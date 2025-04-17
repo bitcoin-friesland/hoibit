@@ -1,0 +1,13 @@
+# Cloudflare Wrangler-artefacten
+.wrangler/
+
+# Node modules en buildbestanden
+node_modules/
+dist/
+build/
+
+# Log- en systeembestanden
+*.log
+.DS_Store
+.vscode/
+.idea/

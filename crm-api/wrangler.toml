@@ -1,0 +1,12 @@
+name = "crm-api"
+account_id = "e6bb99fcf594d0451bd02dcf63a73b26"
+compatibility_date = "2025-04-11"
+main = "index.js"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "crm"
+database_id = "55e548fc-f472-4044-a408-94ef71ba7830"
+
+[vars]
+ALLOWED_BOT_ID = "7885527092"

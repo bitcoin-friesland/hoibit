@@ -1,0 +1,14 @@
+name = "telegram-crm"
+compatibility_date = "2024-04-15"
+main = "index.js"
+
+[vars]
+CRM_API_URL = "https://crm-api"
+
+[[services]]
+binding = "crmApi"
+service = "crm-api"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "06abc28c5b324621a4cf7d76c1288bb8"
