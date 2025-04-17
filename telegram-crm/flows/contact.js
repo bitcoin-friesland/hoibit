@@ -111,7 +111,6 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
                 name: session.name,
                 type: session.type,
                 organization_id: session.organization_id || null,
-                community_id: Array.isArray(session.selected_communities) && session.selected_communities.length === 1 ? session.selected_communities[0] : null,
                 email: session.email || null,
                 phone: session.phone || null,
                 nostr_npub: session.nostr_npub || null,
@@ -211,65 +210,65 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
       // Skip OSM lookup here; do it after community selection
       setStep(session, "awaiting_communities");
       await persistSession();
-      // Start community selection
-      await selectCommunities({
-        sendMessage,
-        env,
-        chatId,
-        session,
-        persistSession,
-        removeSession,
-        userId: session.telegram_id,
-        onComplete: async (communities) => {
-          session.selected_communities = communities;
-          // Determine region from first selected community (fallback to org name if none)
-          let region = null;
-          if (communities && communities.length > 0) {
-            // communities is an array of objects or ids; fetch full object if needed
-            const comm = typeof communities[0] === "object" ? communities[0] : null;
-            region = comm?.region || comm?.name || comm?.city || comm?.country || null;
-            if (!region && typeof communities[0] === "string") {
-              // Try to fetch community object if only id is present
-              const allComms = await selectCommunitiesList(env, session.telegram_id);
-              const found = allComms.find(c => String(c.id) === String(communities[0]));
-              region = found?.name || found?.city || found?.country || null;
+        // Start community selection
+        await selectCommunities({
+          sendMessage,
+          env,
+          chatId,
+          session,
+          persistSession,
+          removeSession,
+          userId: session.telegram_id,
+          onComplete: async (communities) => {
+            session.selected_communities = communities;
+            // Determine region from first selected community (fallback to org name if none)
+            let region = null;
+            if (communities && communities.length > 0) {
+              // communities is an array of objects or ids; fetch full object if needed
+              const comm = typeof communities[0] === "object" ? communities[0] : null;
+              region = comm?.region || comm?.name || comm?.city || comm?.country || null;
+              if (!region && typeof communities[0] === "string") {
+                // Try to fetch community object if only id is present
+                const allComms = await selectCommunitiesList(env, session.telegram_id);
+                const found = allComms.find(c => String(c.id) === String(communities[0]));
+                region = found?.name || found?.city || found?.country || null;
+              }
             }
-          }
-          // Gather org info
-          const orgName = session.organization;
-          let phone = session.phone;
-          const orgWebsite = session.organization_website;
-          const email = session.email;
+            // Gather org info
+            const orgName = session.organization;
+            let phone = session.phone;
+            const orgWebsite = session.organization_website;
+            const email = session.email;
 
-          // Telefoonnummer formatteren naar internationaal formaat
-          if (phone) {
-            phone = formatPhoneNumber(phone);
-          }
+            // Telefoonnummer formatteren naar internationaal formaat
+            if (phone) {
+              phone = formatPhoneNumber(phone);
+            }
 
-          // Show loader before OSM lookup
-          await sendMessage(env, chatId, "Searching for OpenStreetMap locations... ⏳");
+            // Show loader before OSM lookup
+            await sendMessage(env, chatId, "Searching for OpenStreetMap locations... ⏳");
 
-      // OSM lookup
-      let osmResults = [];
-      try {
-        osmResults = await findOsmNodeForOrganization({
-          name: orgName,
-          region,
-          phone,
-          website: orgWebsite,
-          email
-        });
-      } catch (e) {
-        osmResults = [];
-      }
+        // OSM lookup
+        let osmResults = [];
+        try {
+          osmResults = await findOsmNodeForOrganization({
+            name: orgName,
+            region,
+            phone,
+            website: orgWebsite,
+            email
+          });
+        } catch (e) {
+          osmResults = [];
+        }
 
-      // Ensure item.class and item.type are set for Overpass results
-      setOsmClassAndTypeFromTags(osmResults);
+        // Ensure item.class and item.type are set for Overpass results
+        setOsmClassAndTypeFromTags(osmResults);
 
-      // Ask user to select OSM node if results found
-      if (osmResults.length > 0) {
-        // Build details message and buttons
-        const maxResults = 8;
+        // Ask user to select OSM node if results found
+        if (osmResults.length > 0) {
+          // Build details message and buttons
+          const maxResults = 8;
 
 const detailsList = osmResults.slice(0, maxResults).map((item) => {
   const typeTag = getOsmTypeTag(item.tags);
@@ -335,6 +334,70 @@ await sendMessage(
 );
             setStep(session, "awaiting_osm_node");
             await persistSession();
+
+            // Persist organization and organization_communities
+            let organization_id = null;
+            if (session.organization && session.organization_created) {
+              try {
+                const orgRes = await env.crmApi.fetch(new Request(
+                  `${env.CRM_API_URL}/neworg`,
+                  {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      name: session.organization,
+                      status: "active",
+                      location_osm_id: session.osm_node_id ? session.osm_node_id : null,
+                      website: session.organization_website || null,
+                      created_by: session.telegram_id || null
+                    })
+                  }
+                ));
+                if (orgRes.ok) {
+                  const orgData = await orgRes.json().catch(() => ({}));
+                  organization_id = orgData.id || null;
+                  if (organization_id && Array.isArray(session.selected_communities) && session.selected_communities.length > 0) {
+                    await env.crmApi.fetch(new Request(
+                      `${env.CRM_API_URL}/organization_communities`,
+                      {
+                        method: "POST",
+                        headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          organization_id,
+                          community_ids: session.selected_communities,
+                          updated_by: session.telegram_id || null
+                        })
+                      }
+                    ));
+                  }
+                }
+              } catch (e) {}
+            } else if (session.organization_id) {
+              organization_id = session.organization_id;
+            }
+
+            // Persist contact with audit_log
+            try {
+              await env.crmApi.fetch(new Request(
+                `${env.CRM_API_URL}/newcontact`,
+                {
+                  method: "POST",
+                  headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    name: session.name,
+                    type: session.type,
+                    organization_id,
+                    email: session.email || null,
+                    phone: session.phone || null,
+                    nostr_npub: session.nostr_npub || null,
+                    created_by: session.telegram_id || null,
+                  })
+                }
+              ));
+            } catch (e) {}
+
+            await sendMessage(env, chatId, "OpenStreetMap node selected. Contact added.");
+            await removeSession();
             return;
           } else {
             // No OSM results, continue

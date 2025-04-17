@@ -468,6 +468,37 @@ var index_default = {
         return new Response("Failed to count team_members", { status: 500 });
       }
     }
+    if (request.method === "POST" && url.pathname === "/organization_communities") {
+      const data = await request.json();
+      if (!data.organization_id || !Array.isArray(data.community_ids)) {
+        return new Response("Missing organization_id or community_ids", { status: 400 });
+      }
+      try {
+        // Delete existing associations
+        await env.DB.prepare(
+          `DELETE FROM organization_communities WHERE organization_id = ?`
+        ).bind(data.organization_id).run();
+        // Insert new associations
+        for (const community_id of data.community_ids) {
+          await env.DB.prepare(
+            `INSERT INTO organization_communities (organization_id, community_id) VALUES (?, ?)`
+          ).bind(data.organization_id, community_id).run();
+        }
+        await env.DB.prepare(
+          `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
+        ).bind(
+          "update",
+          "organization_communities",
+          data.organization_id,
+          data.updated_by || null,
+          JSON.stringify({ community_ids: data.community_ids })
+        ).run();
+        return new Response("Organization communities updated", { status: 200 });
+      } catch (error) {
+        console.error("Error updating organization communities:", error);
+        return new Response("Failed to update organization communities", { status: 500 });
+      }
+    }
     return new Response("Not found", { status: 404 });
   }
 };
