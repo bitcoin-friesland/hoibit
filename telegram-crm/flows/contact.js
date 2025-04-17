@@ -102,7 +102,7 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
       } else {
         // Persist consumer contact
         try {
-          await env.crmApi.fetch(new Request(
+          const response = await env.crmApi.fetch(new Request(
             `${env.CRM_API_URL}/newcontact`,
             {
               method: "POST",
@@ -110,6 +110,8 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
               body: JSON.stringify({
                 name: session.name,
                 type: session.type,
+                organization_id: session.organization_id || null,
+                community_id: Array.isArray(session.selected_communities) && session.selected_communities.length === 1 ? session.selected_communities[0] : null,
                 email: session.email || null,
                 phone: session.phone || null,
                 nostr_npub: session.nostr_npub || null,
@@ -117,7 +119,14 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
               })
             }
           ));
-        } catch (e) {}
+          if (!response.ok) {
+            await sendMessage(env, chatId, `Failed to add contact (consumer flow): ${response.statusText || response.status}`);
+            return;
+          }
+        } catch (e) {
+          await sendMessage(env, chatId, `Error adding contact (consumer flow): ${e.message || e}`);
+          return;
+        }
         await sendMessage(env, chatId, "Contact added (consumer flow end).");
         await removeSession();
       }

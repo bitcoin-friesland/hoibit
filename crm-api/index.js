@@ -141,6 +141,9 @@ var index_default = {
     if (request.method === "POST" && url.pathname === "/newcontact") {
       const data = await request.json();
       try {
+        if (!data.name || !data.type) {
+          return new Response("Missing required fields: name or type", { status: 400 });
+        }
         let insertContactQuery, contactParams;
         if (data.community_id) {
           insertContactQuery = `INSERT INTO contacts (name, type, organization_id, community_id) VALUES (?, ?, ?, ?)`;
@@ -159,35 +162,35 @@ var index_default = {
           ];
         }
         const contactRes = await env.DB.prepare(insertContactQuery).bind(...contactParams).run();
-        const contactIdResult = await env.DB.prepare(
-          `SELECT id FROM contacts WHERE name = ? ORDER BY id DESC LIMIT 1`
-        ).bind(data.name).first();
-        if (data.email && contactIdResult && contactIdResult.id) {
+        if (!contactRes || !contactRes.lastInsertRowid) {
+          console.error("Insert contact failed, no lastInsertRowid returned");
+          return new Response("Failed to add contact", { status: 500 });
+        }
+        const contactId = contactRes.lastInsertRowid;
+        if (data.email) {
           const insertEmailQuery = `INSERT INTO contact_emails (contact_id, email) VALUES (?, ?)`;
           await env.DB.prepare(insertEmailQuery).bind(
-            contactIdResult.id,
+            contactId,
             data.email
           ).run();
         }
-        if (contactIdResult && contactIdResult.id) {
-          await env.DB.prepare(
-            `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-          ).bind(
-            "insert",
-            "contacts",
-            contactIdResult.id,
-            data.created_by || null,
-            JSON.stringify({
-              fields: {
-                name: { old: null, new: data.name },
-                type: { old: null, new: data.type },
-                organization_id: { old: null, new: data.organization_id || null },
-                ...data.community_id ? { community_id: { old: null, new: data.community_id } } : {},
-                ...data.email ? { email: { old: null, new: data.email } } : {}
-              }
-            })
-          ).run();
-        }
+        await env.DB.prepare(
+          `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
+        ).bind(
+          "insert",
+          "contacts",
+          contactId,
+          data.created_by || null,
+          JSON.stringify({
+            fields: {
+              name: { old: null, new: data.name },
+              type: { old: null, new: data.type },
+              organization_id: { old: null, new: data.organization_id || null },
+              ...data.community_id ? { community_id: { old: null, new: data.community_id } } : {},
+              ...data.email ? { email: { old: null, new: data.email } } : {}
+            }
+          })
+        ).run();
         return new Response("Contact added successfully");
       } catch (error) {
         console.error("Error saving contact:", error);
