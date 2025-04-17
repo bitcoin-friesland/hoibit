@@ -100,6 +100,24 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
         await sendMessage(env, chatId, "Which organization is this contact linked to? (required, type part of the name to search or create a new one)");
         return;
       } else {
+        // Persist consumer contact
+        try {
+          await env.crmApi.fetch(new Request(
+            `${env.CRM_API_URL}/newcontact`,
+            {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: session.name,
+                type: session.type,
+                email: session.email || null,
+                phone: session.phone || null,
+                nostr_npub: session.nostr_npub || null,
+                created_by: session.telegram_id || null,
+              })
+            }
+          ));
+        } catch (e) {}
         await sendMessage(env, chatId, "Contact added (consumer flow end).");
         await removeSession();
       }
@@ -430,47 +448,47 @@ function setOsmClassAndTypeFromTags(osmResults) {
 }
 
 /**
- * Formatteer een telefoonnummer naar internationaal formaat: +[landcode] [areacode] [rest]
- * Werkt generiek voor alle landen, zonder specifieke netnummerlijsten.
- * - Verwijdert spaties, streepjes, puntjes, haakjes.
- * - Zet 00 aan het begin om naar +.
- * - Zet 0 aan het begin om naar +[defaultCountryCode] (optioneel, default +31).
- * - Splitst in landcode, areacode (eerste 1-4 cijfers na landcode), rest.
- * - Resultaat: +[landcode] [areacode] [rest] (met spaties).
+ * Formats a phone number to international format: +[country code] [area code] [rest]
+ * Works generically for all countries, without specific area code lists.
+ * - Removes spaces, dashes, dots, parentheses.
+ * - Converts 00 at the start to +.
+ * - Converts 0 at the start to +[defaultCountryCode] (optional, default +31).
+ * - Splits into country code, area code (first 1-4 digits after country code), rest.
+ * - Result: +[country code] [area code] [rest] (with spaces).
  */
 function formatPhoneNumber(input, defaultCountryCode = "31") {
   if (!input) return input;
-  let phone = input.replace(/[\s\-\.\(\)]/g, ""); // verwijder spaties, streepjes, puntjes, haakjes
+  let phone = input.replace(/[\s\-\.\(\)]/g, ""); // remove spaces, dashes, dots, parentheses
 
-  // Zet 00 aan het begin om naar +
+  // Convert 00 at the start to +
   if (phone.startsWith("00")) {
     phone = "+" + phone.slice(2);
   }
 
-  // Zet 0 aan het begin om naar +[defaultCountryCode]
+  // Convert 0 at the start to +[defaultCountryCode]
   if (phone.startsWith("0")) {
     phone = "+" + defaultCountryCode + phone.slice(1);
   }
 
-  // Als het niet met + begint, geef origineel terug
+  // If it doesn't start with +, return original
   if (!phone.startsWith("+")) {
     return input;
   }
 
-  // Haal landcode (1-3 cijfers na +)
+  // Extract country code (1-3 digits after +)
   const match = phone.match(/^\+(\d{1,3})(\d+)/);
   if (!match) return phone;
 
-  const landcode = match[1];
+  const countryCode = match[1];
   let rest = match[2];
 
-  // Probeer areacode (eerste 1-4 cijfers van rest)
+  // Try to extract area code (first 1-4 digits of rest)
   let areaMatch = rest.match(/^(\d{1,4})(\d+)$/);
-  if (!areaMatch) return `+${landcode} ${rest}`;
-  const areacode = areaMatch[1];
-  const abonnee = areaMatch[2];
+  if (!areaMatch) return `+${countryCode} ${rest}`;
+  const areaCode = areaMatch[1];
+  const subscriber = areaMatch[2];
 
-  return `+${landcode} ${areacode} ${abonnee}`;
+  return `+${countryCode} ${areaCode} ${subscriber}`;
 }
 
         if (osmResults.length > 0) {
@@ -654,26 +672,121 @@ function formatPhoneNumber(input, defaultCountryCode = "31") {
       if (session.last_callback_data && session.last_callback_data.startsWith("osmnode:")) {
         const cb = session.last_callback_data;
         if (cb === "osmnode:none") {
-          // Prompt for manual node ID or skip
           setStep(session, "manual_osm_node");
           await persistSession();
           await sendMessage(env, chatId, "No suitable OpenStreetMap location found. Enter a node ID manually or type 'skip' to continue without one.");
           return;
         } else {
-          // Node selected from list
           session.osm_node_id = cb.replace("osmnode:", "");
           setStep(session, "done");
           await persistSession();
+
+          // --- Persist organization if new, then contact ---
+          let organization_id = null;
+          if (session.organization && session.organization_created) {
+            // Create new organization
+            try {
+              const orgRes = await env.crmApi.fetch(new Request(
+                `${env.CRM_API_URL}/neworg`,
+                {
+                  method: "POST",
+                  headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    name: session.organization,
+                    status: "active",
+                    location_osm_id: session.osm_node_id ? session.osm_node_id : null,
+                    website: session.organization_website || null,
+                    created_by: session.telegram_id || null
+                  })
+                }
+              ));
+              if (orgRes.ok) {
+                const orgData = await orgRes.json().catch(() => ({}));
+                organization_id = orgData.id || null;
+              }
+            } catch (e) {}
+          } else if (session.organization_id) {
+            organization_id = session.organization_id;
+          }
+
+          // Persist contact with audit_log
+          try {
+            await env.crmApi.fetch(new Request(
+              `${env.CRM_API_URL}/newcontact`,
+              {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  name: session.name,
+                  type: session.type,
+                  organization_id,
+                  community_id: Array.isArray(session.selected_communities) && session.selected_communities.length === 1 ? session.selected_communities[0] : null,
+                  email: session.email || null,
+                  phone: session.phone || null,
+                  nostr_npub: session.nostr_npub || null,
+                  created_by: session.telegram_id || null,
+                })
+              }
+            ));
+          } catch (e) {}
+
           await sendMessage(env, chatId, "OpenStreetMap node selected. Contact added.");
           await removeSession();
           return;
         }
       }
-      // Fallback: if text is provided directly (manual entry)
       if (nodeId && nodeId.toLowerCase() !== "skip") {
         session.osm_node_id = nodeId;
         setStep(session, "done");
         await persistSession();
+
+        // --- Persist organization if new, then contact ---
+        let organization_id = null;
+        if (session.organization && session.organization_created) {
+          try {
+            const orgRes = await env.crmApi.fetch(new Request(
+              `${env.CRM_API_URL}/neworg`,
+              {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  name: session.organization,
+                  status: "active",
+                  location_osm_id: session.osm_node_id ? session.osm_node_id : null,
+                  website: session.organization_website || null,
+                  created_by: session.telegram_id || null
+                })
+              }
+            ));
+            if (orgRes.ok) {
+              const orgData = await orgRes.json().catch(() => ({}));
+              organization_id = orgData.id || null;
+            }
+          } catch (e) {}
+        } else if (session.organization_id) {
+          organization_id = session.organization_id;
+        }
+
+        try {
+          await env.crmApi.fetch(new Request(
+            `${env.CRM_API_URL}/newcontact`,
+            {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: session.name,
+                type: session.type,
+                organization_id,
+                community_id: Array.isArray(session.selected_communities) && session.selected_communities.length === 1 ? session.selected_communities[0] : null,
+                email: session.email || null,
+                phone: session.phone || null,
+                nostr_npub: session.nostr_npub || null,
+                created_by: session.telegram_id || null,
+              })
+            }
+          ));
+        } catch (e) {}
+
         await sendMessage(env, chatId, "Manual OpenStreetMap node ID saved. Contact added.");
         await removeSession();
         return;
@@ -681,11 +794,57 @@ function formatPhoneNumber(input, defaultCountryCode = "31") {
       if (nodeId && nodeId.toLowerCase() === "skip") {
         setStep(session, "done");
         await persistSession();
+
+        // --- Persist organization if new, then contact ---
+        let organization_id = null;
+        if (session.organization && session.organization_created) {
+          try {
+            const orgRes = await env.crmApi.fetch(new Request(
+              `${env.CRM_API_URL}/neworg`,
+              {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  name: session.organization,
+                  status: "active",
+                  website: session.organization_website || null,
+                  created_by: session.telegram_id || null
+                })
+              }
+            ));
+            if (orgRes.ok) {
+              const orgData = await orgRes.json().catch(() => ({}));
+              organization_id = orgData.id || null;
+            }
+          } catch (e) {}
+        } else if (session.organization_id) {
+          organization_id = session.organization_id;
+        }
+
+        try {
+          await env.crmApi.fetch(new Request(
+            `${env.CRM_API_URL}/newcontact`,
+            {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: session.name,
+                type: session.type,
+                organization_id,
+                community_id: Array.isArray(session.selected_communities) && session.selected_communities.length === 1 ? session.selected_communities[0] : null,
+                email: session.email || null,
+                phone: session.phone || null,
+                nostr_npub: session.nostr_npub || null,
+                created_by: session.telegram_id || null
+              })
+            }
+          ));
+        } catch (e) {}
+
         await sendMessage(env, chatId, "No OpenStreetMap node linked. Contact added.");
         await removeSession();
         return;
       }
-      // If no input, prompt again
       await sendMessage(env, chatId, "Please enter a node ID or type 'skip'.");
       break;
     }
