@@ -186,7 +186,7 @@ var index_default = {
 /newcontact - Add new contact
 /neworg - Add new organization
 /logconversation - Log a conversation
-/invite - Invite a new team member
+/teammember - Manage team members (invite, edit)
 /cancel - Cancel current input`);
       return new Response("OK");
     }
