@@ -358,8 +358,6 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
         } // <-- Close onComplete async function
       }); // <-- Close selectCommunities call
       break;
-      }
-    }
     case "awaiting_communities": {
       // Multi-select communities
       if (!session.selected_communities) session.selected_communities = [];
@@ -504,7 +502,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
     }
     // End of awaiting_communities case
     break;
-  }
+  } // <-- Add this to close the switch statement
   // End of switch
 }
 // End of handleContactFlow
