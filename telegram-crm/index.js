@@ -143,17 +143,30 @@ var index_default = {
             return new Response("Error", { status: 500 });
           }
           const { count } = await countRes.json();
-          if (count === 0) {
-            if (!session || session.mode !== "first_user") {
-              session = { step: "awaiting_first_name", telegram_id: userId, mode: "first_user" };
-              await setSession(env, chatId, session);
-              await sendMessage(env, chatId, "Welcome! You are the first user. Please enter your name to register as the first team member:");
-              return new Response("OK");
+      if (count === 0) {
+        if (!session || session.mode !== "first_user") {
+          session = { step: "awaiting_first_name", telegram_id: userId, mode: "first_user" };
+          await setSession(env, chatId, session);
+          await sendMessage(env, chatId, "Welcome! You are the first user. Please enter your name to register as the first team member:");
+          return new Response("OK");
+        }
+      } else {
+        // Only send unauthorized message in private chats or if message is a bot command in group chats
+        const chatType = update.message.chat.type;
+        const isPrivate = chatType === "private";
+        const isBotCommand = text && text.startsWith("/");
+        if (isPrivate || isBotCommand) {
+          if (!session || !session.unauthorizedMessageSent) {
+            if (!session) {
+              session = {};
             }
-          } else {
+            session.unauthorizedMessageSent = true;
+            await setSession(env, chatId, session);
             await sendMessage(env, chatId, "You are not authorized to use this bot. Contact a team member for access.");
-            return new Response("Forbidden", { status: 403 });
           }
+        }
+        return new Response("Forbidden", { status: 403 });
+      }
         } catch (e2) {
           await sendMessage(env, chatId, `[crmApi fetch EXCEPTION: team_members/count] ${e2 && e2.stack ? e2.stack : e2}`);
           return new Response("Error", { status: 500 });
