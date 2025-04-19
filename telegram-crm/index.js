@@ -162,7 +162,7 @@ var index_default = {
             }
             session.unauthorizedMessageSent = true;
             await setSession(env, chatId, session);
-            await sendMessage(env, chatId, "You are not authorized to use this bot. Contact a team member for access.");
+            await sendMessage(env, chatId, `You are not authorized to use this bot. Contact a team member for access. Share the team member your Telegram user ID ${userId}`);
           }
         }
         return new Response("Forbidden", { status: 403 });
