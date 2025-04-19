@@ -306,53 +306,46 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
               if (item.class && item.type) {
                 nominatimLine = `*Nominatim class/type:* ${item.class} = ${item.type}\n`;
               }
-              return (
-                `# ${item.osm_id}\n` +
-                `*Name:* ${item.name || "(no name)"}\n` +
-                osmTypeLine +
-                tagLines +
-                nominatimLine +
-                (typeTag ? `${typeTag}\n` : "") +
-                `*Address:* ${[
-                  item.address.street,
-                  item.address.housenumber,
-                  item.postcode,
-                  item.address.city,
-                  item.address.region,
-                  item.address.country
-                ].filter(Boolean).join(", ")}\n` +
-                (item.phone ? `*Phone:* ${item.phone}\n` : "") +
-                (item.email ? `*Email:* ${item.email}\n` : "") +
-                (item.website ? `*Website:* ${item.website}\n` : "")
-              );
+              return `# ${item.osm_id}
+*Name:* ${item.name || "(no name)"}
+${osmTypeLine}${tagLines}${nominatimLine}${typeTag ? `${typeTag}\n` : ""}*Address:* ${[
+  item.address.street,
+  item.address.housenumber,
+  item.postcode,
+  item.address.city,
+  item.address.region,
+  item.address.country
+].filter(Boolean).join(", ")}
+${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.email}\n` : ""}${item.website ? `*Website:* ${item.website}\n` : ""}`;
             }).join("\n\n");
 
             const keyboard = osmResults.slice(0, maxResults).map((item) => [{
               text: `# ${item.osm_id}`,
-  callback_data: `osmnode:${item.id}`
-}]);
-keyboard.push([{ text: "None of the above", callback_data: "osmnode:none" }]);
+              callback_data: `osmnode:${item.id}`
+            }]);
+            keyboard.push([{ text: "None of the above", callback_data: "osmnode:none" }]);
 
-await sendMessage(
-  env,
-  chatId,
-  `Select the correct OpenStreetMap location for this organization:\n\n${detailsList}`,
-  {
-    reply_markup: { inline_keyboard: keyboard },
-    parse_mode: "Markdown"
-  }
-);
-      setStep(session, "awaiting_osm_node");
-      await persistSession();
-      return;
-    } else {
-      // No OSM results, continue
-      setStep(session, "awaiting_org_nostr");
-      await persistSession();
-      await sendMessage(env, chatId, "Communities saved. Please enter the nostr npub of the organization (optional).");
-    }
-    break;
-  }
+            await sendMessage(
+              env,
+              chatId,
+              `Select the correct OpenStreetMap location for this organization:\n\n${detailsList}`,
+              {
+                reply_markup: { inline_keyboard: keyboard },
+                parse_mode: "Markdown"
+              }
+            );
+            setStep(session, "awaiting_osm_node");
+            await persistSession();
+            return;
+          } else {
+            // No OSM results, continue
+            setStep(session, "awaiting_org_nostr");
+            await persistSession();
+            await sendMessage(env, chatId, "Communities saved. Please enter the nostr npub of the organization (optional).");
+          }
+        }
+        break;
+      }
         case "awaiting_communities": {
           // Multi-select communities
           if (!session.selected_communities) session.selected_communities = [];
@@ -461,25 +454,17 @@ await sendMessage(
                 if (item.class && item.type) {
                   nominatimLine = `*Nominatim class/type:* ${item.class} = ${item.type}\n`;
                 }
-                return (
-                  `# ${item.osm_id}\n` +
-                  `*Name:* ${item.name || "(no name)"}\n` +
-                  osmTypeLine +
-                  tagLines +
-                  nominatimLine +
-                  (typeTag ? `${typeTag}\n` : "") +
-                  `*Address:* ${[
-                    item.address.street,
-                    item.address.housenumber,
-                    item.postcode,
-                    item.address.city,
-                    item.address.region,
-                    item.address.country
-                  ].filter(Boolean).join(", ")}\n` +
-                  (item.phone ? `*Phone:* ${item.phone}\n` : "") +
-                  (item.email ? `*Email:* ${item.email}\n` : "") +
-                  (item.website ? `*Website:* ${item.website}\n` : "")
-                );
+                return `# ${item.osm_id}
+*Name:* ${item.name || "(no name)"}
+${osmTypeLine}${tagLines}${nominatimLine}${typeTag ? `${typeTag}\n` : ""}*Address:* ${[
+  item.address.street,
+  item.address.housenumber,
+  item.postcode,
+  item.address.city,
+  item.address.region,
+  item.address.country
+].filter(Boolean).join(", ")}
+${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.email}\n` : ""}${item.website ? `*Website:* ${item.website}\n` : ""}`;
               }).join("\n\n");
 
               const keyboard = osmResults.slice(0, maxResults).map((item) => [{
