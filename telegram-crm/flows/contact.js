@@ -4,6 +4,18 @@ import { errorMessage, promptWithSkip, promptWithOptions } from "../helpers/mess
 import { selectCommunities, fetchCountries, fetchCommunitiesByCountry, selectCommunitiesList } from "../helpers/community.js";
 import { findOsmNodeForOrganization } from "../helpers/osm.js";
 
+// Formats a phone number to international format (dummy implementation)
+function formatPhoneNumber(phone) {
+  // Add real formatting logic as needed
+  return phone;
+}
+
+// Ensures item.class and item.type are set for Overpass results (dummy implementation)
+function setOsmClassAndTypeFromTags(osmResults) {
+  // Add real logic as needed
+  return;
+}
+
 /**
  * Returns a formatted OSM type tag string for given tags, or null if not found.
  */
@@ -346,115 +358,110 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
         }
         break;
       }
-        case "awaiting_communities": {
-          // Multi-select communities
-          if (!session.selected_communities) session.selected_communities = [];
+    }
+    case "awaiting_communities": {
+      // Multi-select communities
+      if (!session.selected_communities) session.selected_communities = [];
 
-          const cb = session.last_callback_data;
+      const cb = session.last_callback_data;
 
-          // Handle skip
-          if (cb === "skip") {
-            setStep(session, "done");
-            await persistSession();
-            await sendMessage(env, chatId, "No communities selected. Contact added.");
-            await removeSession();
-            return;
+      // Handle skip
+      if (cb === "skip") {
+        setStep(session, "done");
+        await persistSession();
+        await sendMessage(env, chatId, "No communities selected. Contact added.");
+        await removeSession();
+        return;
+      }
+
+      // Handle confirm selection
+      if (cb === "confirm_communities") {
+        // After confirmation, do OSM lookup and selection
+        let regions = [];
+        if (session.selected_communities && session.selected_communities.length > 0) {
+          const allComms = await selectCommunitiesList(env, session.telegram_id);
+          const selectedComms = allComms.filter(c => session.selected_communities.includes(String(c.id)));
+          regions = selectedComms
+            .map(c => c.region)
+            .filter(Boolean);
+        }
+        const orgName = session.organization;
+        let phone = session.phone;
+        const orgWebsite = session.organization_website;
+        const email = session.email;
+
+        // Format phone number to international format
+        if (phone) {
+          phone = formatPhoneNumber(phone);
+        }
+
+        // Show loader before OSM lookup
+        await sendMessage(env, chatId, "Searching for OpenStreetMap locations... ⏳");
+
+        let osmResults = [];
+        try {
+          if (regions.length > 0) {
+            // Search per region, aggregate results
+            const resultsPerRegion = await Promise.all(
+              regions.map(region =>
+                findOsmNodeForOrganization({
+                  name: orgName,
+                  region,
+                  phone,
+                  website: orgWebsite,
+                  email
+                })
+              )
+            );
+            osmResults = resultsPerRegion.flat();
+          } else {
+            // No regions, do a single search without region
+            osmResults = await findOsmNodeForOrganization({
+              name: orgName,
+              region: null,
+              phone,
+              website: orgWebsite,
+              email
+            });
           }
+        } catch (e) {
+          osmResults = [];
+        }
 
-          // Handle confirm selection
-          if (cb === "confirm_communities") {
-            // After confirmation, do OSM lookup and selection
-            let regions = [];
-            if (session.selected_communities && session.selected_communities.length > 0) {
-              const allComms = await selectCommunitiesList(env, session.telegram_id);
-              const selectedComms = allComms.filter(c => session.selected_communities.includes(String(c.id)));
-              regions = selectedComms
-                .map(c => c.region)
-                .filter(Boolean);
+        // Ensure item.class and item.type are set for Overpass results
+        setOsmClassAndTypeFromTags(osmResults);
+
+        // Ask user to select OSM node if results found
+        if (osmResults.length > 0) {
+          // Build details message and buttons
+          const maxResults = 8;
+          const detailsList = osmResults.slice(0, maxResults).map((item) => {
+            const typeTag = getOsmTypeTag(item.tags);
+            let osmTypeLine = "";
+            if (item.class && item.type) {
+              osmTypeLine = `*OSM type:* ${item.class} = ${item.type}\n`;
+            } else if (item.tags) {
+              for (const key of OSM_TYPE_KEYS) {
+                if (item.tags[key]) {
+                  osmTypeLine = `*OSM type:* ${key} = ${item.tags[key]}\n`;
+                  break;
+                }
+              }
             }
-            const orgName = session.organization;
-            let phone = session.phone;
-            const orgWebsite = session.organization_website;
-            const email = session.email;
-
-            // Format phone number to international format
-            if (phone) {
-              phone = formatPhoneNumber(phone);
+            // Show all relevant OSM tags
+            let tagLines = "";
+            if (item.tags) {
+              tagLines = OSM_TYPE_KEYS
+                .filter(key => item.tags[key])
+                .map(key => `*Tag:* ${key} = ${item.tags[key]}\n`)
+                .join("");
             }
-
-                // Debug: log OSM search parameters
-
-                // Show loader before OSM lookup
-                await sendMessage(env, chatId, "Searching for OpenStreetMap locations... ⏳");
-
-                let osmResults = [];
-                try {
-                  if (regions.length > 0) {
-                    // Search per region, aggregate results
-                    const resultsPerRegion = await Promise.all(
-                      regions.map(region =>
-                        findOsmNodeForOrganization({
-                          name: orgName,
-                          region,
-                          phone,
-                          website: orgWebsite,
-                          email
-                        })
-                      )
-                    );
-                    osmResults = resultsPerRegion.flat();
-
-                    // Debug output: show number of results per region
-                    resultsPerRegion.forEach((result, idx) => {
-                    });
-                  } else {
-                    // No regions, do a single search without region
-                    osmResults = await findOsmNodeForOrganization({
-                      name: orgName,
-                      region: null,
-                      phone,
-                      website: orgWebsite,
-                      email
-                    });
-                  }
-                } catch (e) {
-                  osmResults = [];
-                }
-
-            // Ensure item.class and item.type are set for Overpass results
-            setOsmClassAndTypeFromTags(osmResults);
-
-            // Ask user to select OSM node if results found
-            if (osmResults.length > 0) {
-              // Build details message and buttons
-              const maxResults = 8;
-              const detailsList = osmResults.slice(0, maxResults).map((item) => {
-                const typeTag = getOsmTypeTag(item.tags);
-                let osmTypeLine = "";
-                if (item.class && item.type) {
-                  osmTypeLine = `*OSM type:* ${item.class} = ${item.type}\n`;
-                } else if (item.tags) {
-                  for (const key of OSM_TYPE_KEYS) {
-                    if (item.tags[key]) {
-                      osmTypeLine = `*OSM type:* ${key} = ${item.tags[key]}\n`;
-                      break;
-                    }
-                  }
-                }
-                // Show all relevant OSM tags
-                let tagLines = "";
-                if (item.tags) {
-                  tagLines = OSM_TYPE_KEYS
-                    .filter(key => item.tags[key])
-                    .map(key => `*Tag:* ${key} = ${item.tags[key]}\n`)
-                    .join("");
-                }
-                // Always show Nominatim class/type if present
-                let nominatimLine = "";
-                if (item.class && item.type) {
-                  nominatimLine = `*Nominatim class/type:* ${item.class} = ${item.type}\n`;
-                }
-                return `# ${item.osm_id}
+            // Always show Nominatim class/type if present
+            let nominatimLine = "";
+            if (item.class && item.type) {
+              nominatimLine = `*Nominatim class/type:* ${item.class} = ${item.type}\n`;
+            }
+            return `# ${item.osm_id}
 *Name:* ${item.name || "(no name)"}
 ${osmTypeLine}${tagLines}${nominatimLine}${typeTag ? `${typeTag}\n` : ""}*Address:* ${[
   item.address.street,
@@ -465,34 +472,38 @@ ${osmTypeLine}${tagLines}${nominatimLine}${typeTag ? `${typeTag}\n` : ""}*Addres
   item.address.country
 ].filter(Boolean).join(", ")}
 ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.email}\n` : ""}${item.website ? `*Website:* ${item.website}\n` : ""}`;
-              }).join("\n\n");
+          }).join("\n\n");
 
-              const keyboard = osmResults.slice(0, maxResults).map((item) => [{
-                text: `# ${item.osm_id}`,
-                callback_data: `osmnode:${item.id}`
-              }]);
-              keyboard.push([{ text: "None of the above", callback_data: "osmnode:none" }]);
+          const keyboard = osmResults.slice(0, maxResults).map((item) => [{
+            text: `# ${item.osm_id}`,
+            callback_data: `osmnode:${item.id}`
+          }]);
+          keyboard.push([{ text: "None of the above", callback_data: "osmnode:none" }]);
 
-              await sendMessage(
-                env,
-                chatId,
-                `Select the correct OpenStreetMap location for this organization:\n\n${detailsList}`,
-                {
-                  reply_markup: { inline_keyboard: keyboard },
-                  parse_mode: "Markdown"
-                }
-              );
-              setStep(session, "awaiting_osm_node");
-              await persistSession();
-              return;
-            } else {
-              setStep(session, "done");
-              await persistSession();
-              await sendMessage(env, chatId, "Communities saved. Contact added. (No OSM location found.)");
-              await removeSession();
+          await sendMessage(
+            env,
+            chatId,
+            `Select the correct OpenStreetMap location for this organization:\n\n${detailsList}`,
+            {
+              reply_markup: { inline_keyboard: keyboard },
+              parse_mode: "Markdown"
             }
-            break;
-          }
+          );
+          setStep(session, "awaiting_osm_node");
+          await persistSession();
+          return;
+        } else {
+          setStep(session, "done");
+          await persistSession();
+          await sendMessage(env, chatId, "Communities saved. Contact added. (No OSM location found.)");
+          await removeSession();
+        }
+        break;
       }
+    }
+    // End of awaiting_communities case
+    break;
   }
+  // End of switch
 }
+// End of handleContactFlow
