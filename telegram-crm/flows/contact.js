@@ -355,8 +355,9 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
             await persistSession();
             await sendMessage(env, chatId, "Communities saved. Please enter the nostr npub of the organization (optional).");
           }
-        }
-        break;
+        } // <-- Close onComplete async function
+      }); // <-- Close selectCommunities call
+      break;
       }
     }
     case "awaiting_communities": {
