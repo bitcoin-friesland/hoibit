@@ -366,6 +366,38 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
 
       const cb = session.last_callback_data;
 
+      // Handle community selection (toggle)
+      if (cb && cb.startsWith("community:")) {
+        const commId = cb.split(":")[1];
+        if (!session.selected_communities) session.selected_communities = [];
+        const commIdStr = String(commId);
+        const idx = session.selected_communities.indexOf(commIdStr);
+        if (idx === -1) {
+          session.selected_communities.push(commIdStr);
+        } else {
+          session.selected_communities.splice(idx, 1);
+        }
+        await persistSession();
+
+        // Fetch all communities for button labels
+        const allComms = await selectCommunitiesList(env, session.telegram_id);
+        const keyboard = allComms.map(c => {
+          const selected = session.selected_communities.includes(String(c.id));
+          return [{
+            text: `${selected ? "✅ " : ""}${c.name}`,
+            callback_data: `community:${c.id}`
+          }];
+        });
+        keyboard.push(
+          [{ text: "Bevestigen", callback_data: "confirm_communities" }],
+          [{ text: "Skip", callback_data: "skip" }]
+        );
+        await sendMessage(env, chatId, "Selecteer Bitcoin communities voor deze organisatie (meerdere mogelijk):", {
+          reply_markup: { inline_keyboard: keyboard }
+        });
+        return;
+      }
+
       // Handle skip
       if (cb === "skip") {
         setStep(session, "done");
