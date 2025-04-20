@@ -1,1 +1,0 @@
-/* This file is intentionally left empty as the invite flow has been merged into teammember.js */

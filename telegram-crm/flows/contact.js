@@ -358,6 +358,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
         } // <-- Close onComplete async function
       }); // <-- Close selectCommunities call
       break;
+    }
     case "awaiting_communities": {
       // Multi-select communities
       if (!session.selected_communities) session.selected_communities = [];
@@ -372,7 +373,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
         await removeSession();
         return;
       }
-
+    
       // Handle confirm selection
       if (cb === "confirm_communities") {
         // After confirmation, do OSM lookup and selection

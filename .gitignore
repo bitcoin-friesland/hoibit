@@ -11,7 +11,7 @@ build/
 .DS_Store
 .vscode/
 .idea/
+.clinerules/
 
 # Others
 schema.sql
-crm-context.txt
