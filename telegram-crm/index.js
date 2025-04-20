@@ -49,6 +49,9 @@ var index_default = {
       return new Response("Not found", { status: 404 });
     }
     const update = await request.json();
+    // Log update for debugging repeated unauthorized messages
+    // console.log("Received update:", JSON.stringify(update));
+
     let chatId, userId, session;
 
     if (update.callback_query) {
@@ -67,6 +70,11 @@ var index_default = {
     }
     async function removeSession() {
       if (chatId) await deleteSession(env, chatId);
+    }
+
+    // Track unauthorized message sent per user in-memory to avoid repeated sends on session expiration
+    if (!globalThis.unauthorizedMessageSentUsers) {
+      globalThis.unauthorizedMessageSentUsers = new Set();
     }
 
     // Handle button/inline callbacks
@@ -110,7 +118,12 @@ var index_default = {
 
     const message = update.message;
     const text = message?.text?.trim();
-    if (!chatId || !userId || !text) return new Response("Invalid input");
+
+    // Only proceed if chatId, userId, and text exist to avoid repeated sends on non-user input updates
+    if (!chatId || !userId || !text) {
+      // Ignore non-text updates to prevent repeated unauthorized messages on session expiration
+      return new Response("Invalid input");
+    }
 
     let createdBy = null;
     let userValidated = false;
@@ -155,12 +168,15 @@ var index_default = {
         const isPrivate = chatType === "private";
         const isBotCommand = text && text.startsWith("/");
         if (isPrivate || isBotCommand) {
-          if (!session || !session.unauthorizedMessageSent) {
+          const unauthorizedSentKey = `unauthorized_sent:${userId}`;
+          const unauthorizedSent = await env.SESSIONS.get(unauthorizedSentKey);
+          if (!unauthorizedSent) {
             if (!session) {
               session = {};
             }
             session.unauthorizedMessageSent = true;
             await setSession(env, chatId, session);
+            await env.SESSIONS.put(unauthorizedSentKey, "true", { expirationTtl: 86400 }); // 24 hours TTL
             await sendMessage(env, chatId, `You are not authorized to use this bot. Contact a team member for access. Share the team member your Telegram user ID ${userId}`);
           }
         }
