@@ -392,7 +392,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
           [{ text: "Bevestigen", callback_data: "confirm_communities" }],
           [{ text: "Skip", callback_data: "skip" }]
         );
-        await sendMessage(env, chatId, "Selecteer Bitcoin communities voor deze organisatie (meerdere mogelijk):", {
+        await sendMessage(env, chatId, "Select Bitcoin communities for this organization (multiple allowed):", {
           reply_markup: { inline_keyboard: keyboard }
         });
         return;
