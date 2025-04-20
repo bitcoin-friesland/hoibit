@@ -19,7 +19,7 @@ function setOsmClassAndTypeFromTags(osmResults) {
 /**
  * Returns a formatted OSM type tag string for given tags, or null if not found.
  */
-export async function handleContactFlow(sendMessage, env, chatId, text, session, persistSession = async () => {}, removeSession = async () => {}) {
+export async function handleContactFlow(sendMessage, env, chatId, text, session, persistSession = async () => { }, removeSession = async () => { }) {
   const OSM_TYPE_KEYS = [
     "shop", "amenity", "office", "craft", "industrial", "tourism", "leisure", "healthcare", "religion", "farm", "landuse"
   ];
@@ -154,9 +154,9 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
         (text && text.trim()) ||
         (session.last_callback_data
           ? (
-            session.last_callback_data.startsWith("confirm_org:") ? session.last_callback_data.replace("confirm_org:","")
-            : session.last_callback_data.startsWith("select_org:") ? session.last_callback_data.replace("select_org:","")
-            : null)
+            session.last_callback_data.startsWith("confirm_org:") ? session.last_callback_data.replace("confirm_org:", "")
+              : session.last_callback_data.startsWith("select_org:") ? session.last_callback_data.replace("select_org:", "")
+                : null)
           : null);
       if (!org || /^\d+$/.test(org) || /@/.test(org) || /[^a-zA-Z0-9\s&\-,.'"]/g.test(org)) {
         await sendMessage(env, chatId, errorMessage("Please enter a valid organization name (organization names should be words, not a phone number or symbols)."));
@@ -221,7 +221,8 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
 
       setStep(session, "awaiting_org_nostr");
       await persistSession();
-      await sendMessage(env, chatId, "What is the nostr npub of the organization? (optional)");
+      const prompt = promptWithSkip("What is the nostr npub of the organization? (optional)");
+      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
       break;
     }
     case "awaiting_org_nostr": {
@@ -321,13 +322,13 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
               return `# ${item.osm_id}
 *Name:* ${item.name || "(no name)"}
 ${osmTypeLine}${tagLines}${nominatimLine}${typeTag ? `${typeTag}\n` : ""}*Address:* ${[
-  item.address.street,
-  item.address.housenumber,
-  item.postcode,
-  item.address.city,
-  item.address.region,
-  item.address.country
-].filter(Boolean).join(", ")}
+                  item.address.street,
+                  item.address.housenumber,
+                  item.postcode,
+                  item.address.city,
+                  item.address.region,
+                  item.address.country
+                ].filter(Boolean).join(", ")}
 ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.email}\n` : ""}${item.website ? `*Website:* ${item.website}\n` : ""}`;
             }).join("\n\n");
 
@@ -373,7 +374,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
         await removeSession();
         return;
       }
-    
+
       // Handle confirm selection
       if (cb === "confirm_communities") {
         // After confirmation, do OSM lookup and selection
@@ -464,13 +465,13 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
             return `# ${item.osm_id}
 *Name:* ${item.name || "(no name)"}
 ${osmTypeLine}${tagLines}${nominatimLine}${typeTag ? `${typeTag}\n` : ""}*Address:* ${[
-  item.address.street,
-  item.address.housenumber,
-  item.postcode,
-  item.address.city,
-  item.address.region,
-  item.address.country
-].filter(Boolean).join(", ")}
+                item.address.street,
+                item.address.housenumber,
+                item.postcode,
+                item.address.city,
+                item.address.region,
+                item.address.country
+              ].filter(Boolean).join(", ")}
 ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.email}\n` : ""}${item.website ? `*Website:* ${item.website}\n` : ""}`;
           }).join("\n\n");
 
@@ -501,8 +502,8 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
         break;
       }
     }
-    // End of awaiting_communities case
-    break;
+      // End of awaiting_communities case
+      break;
   } // <-- Add this to close the switch statement
   // End of switch
 }
