@@ -504,12 +504,15 @@ var index_default = {
     if (request.method === "POST" && url.pathname === "/first-user") {
       const data = await request.json();
       if (!data.telegram_id || !data.name) {
+        console.error("First user registration: missing telegram_id or name", { data });
         return new Response("Missing telegram_id or name", { status: 400 });
       }
       try {
         // Check if any team members exist
         const countResult = await env.DB.prepare("SELECT COUNT(*) as count FROM team_members").first();
+        console.log("First user registration: team_members count result", { countResult, data });
         if (countResult && countResult.count > 0) {
+          console.warn("First user registration not allowed: team members already exist", { countResult, data });
           return new Response("First user registration not allowed: team members already exist", { status: 409 });
         }
         // Insert new team member (reuse logic from /team_member)
@@ -519,10 +522,13 @@ var index_default = {
         const insertParams = data.time_zone
           ? [data.telegram_id, data.name, data.time_zone]
           : [data.telegram_id, data.name];
+        console.log("First user registration: insertQuery and params", { insertQuery, insertParams });
         const res = await env.DB.prepare(insertQuery).bind(...insertParams).run();
+        console.log("First user registration: insert result", { res });
         const newMember = await env.DB.prepare(
           `SELECT id FROM team_members WHERE telegram_id = ?`
         ).bind(data.telegram_id).first();
+        console.log("First user registration: newMember select result", { newMember });
         await env.DB.prepare(
           `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
         ).bind(
@@ -538,9 +544,13 @@ var index_default = {
             }
           })
         ).run();
+        console.log("First user registration: audit_log insert complete");
         return Response.json({ id: newMember.id, created: true });
       } catch (error) {
-        console.error("Error saving first user:", error);
+        console.error("Error saving first user:", {
+          error: error && error.stack ? error.stack : error,
+          data
+        });
         return new Response("Failed to add first user", { status: 500 });
       }
     }
