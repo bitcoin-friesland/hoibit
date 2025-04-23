@@ -45,15 +45,15 @@ INSERT INTO contact_types (id, label) VALUES
 
 -- organization_statuses
 CREATE TABLE organization_statuses (
-  id TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   label TEXT NOT NULL
 );
 
 INSERT INTO organization_statuses (id, label) VALUES
-  ('btc-curious', 'Curious about Bitcoin'),
-  ('accepts-bitcoin', 'Accepts Bitcoin'),
-  ('not-interested', 'Not Interested'),
-  ('stopped-accepting', 'Stopped Accepting Bitcoin');
+  (1, 'Curious about Bitcoin'),
+  (2, 'Accepts Bitcoin'),
+  (3, 'Not Interested'),
+  (4, 'Stopped Accepting Bitcoin');
 
 -- channels
 CREATE TABLE channels (
@@ -175,7 +175,7 @@ CREATE TABLE organizations (
   name TEXT NOT NULL,
   nostr_npub TEXT,
   location_osm_id TEXT,
-  status TEXT REFERENCES organization_statuses(id),
+  status INTEGER REFERENCES organization_statuses(id),
   website TEXT,
   parent_id INTEGER REFERENCES organizations(id)
 );

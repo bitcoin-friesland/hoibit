@@ -19,6 +19,13 @@ function setOsmClassAndTypeFromTags(osmResults) {
 /**
  * Returns a formatted OSM type tag string for given tags, or null if not found.
  */
+const ORG_STATUS_CODE_TO_ID = {
+  "btc-curious": 1,
+  "accepts-bitcoin": 2,
+  "not-interested": 3,
+  "stopped-accepting": 4
+};
+
 export async function handleContactFlow(sendMessage, env, chatId, text, session, persistSession = async () => { }, removeSession = async () => { }) {
   const OSM_TYPE_KEYS = [
     "shop", "amenity", "office", "craft", "industrial", "tourism", "leisure", "healthcare", "religion", "farm", "landuse"
@@ -557,12 +564,28 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
           // No OSM results, but still need to create org and contact
           try {
             // 1. Create organization (without OSM node)
+            // Robustness: Ensure organization_status is set and valid before creating org
+            const validStatuses = [
+              "btc-curious",
+              "accepts-bitcoin",
+              "not-interested",
+              "stopped-accepting"
+            ];
+            if (!session.organization_status || !validStatuses.includes(session.organization_status)) {
+              await sendMessage(env, chatId, "Error: Organization status is missing or invalid. Please restart the flow.");
+              return;
+            }
+            const statusId = ORG_STATUS_CODE_TO_ID[session.organization_status];
+            if (!statusId) {
+              await sendMessage(env, chatId, "Error: Could not map organization status to ID. Please contact support.");
+              return;
+            }
             const orgPayload = {
               name: session.organization,
               website: session.organization_website || null,
               nostr_npub: session.organization_nostr_npub || null,
               location_osm_id: null,
-              status: session.organization_status,
+              status: ORG_STATUS_CODE_TO_ID[session.organization_status],
               created_by: session.telegram_id || null
             };
             const orgResponse = await env.crmApi.fetch(new Request(
@@ -652,12 +675,28 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
       // Add organization first, then contact (entrepreneur flow)
       try {
         // 1. Create organization
+        // Robustness: Ensure organization_status is set and valid before creating org
+        const validStatuses = [
+          "btc-curious",
+          "accepts-bitcoin",
+          "not-interested",
+          "stopped-accepting"
+        ];
+        if (!session.organization_status || !validStatuses.includes(session.organization_status)) {
+          await sendMessage(env, chatId, "Error: Organization status is missing or invalid. Please restart the flow.");
+          return;
+        }
+        const statusId = ORG_STATUS_CODE_TO_ID[session.organization_status];
+        if (!statusId) {
+          await sendMessage(env, chatId, "Error: Could not map organization status to ID. Please contact support.");
+          return;
+        }
         const orgPayload = {
           name: session.organization,
           website: session.organization_website || null,
           nostr_npub: session.organization_nostr_npub || null,
           location_osm_id: session.osm_node || null,
-          status: session.organization_status,
+          status: ORG_STATUS_CODE_TO_ID[session.organization_status],
           created_by: session.telegram_id || null
         };
         const orgResponse = await env.crmApi.fetch(new Request(
