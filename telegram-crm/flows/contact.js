@@ -526,9 +526,81 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
           await persistSession();
           return;
         } else {
+          // No OSM results, but still need to create org and contact
+          try {
+            // 1. Create organization (without OSM node)
+            const orgPayload = {
+              name: session.organization,
+              website: session.organization_website || null,
+              nostr_npub: session.organization_nostr_npub || null,
+              location_osm_id: null,
+              status: "active",
+              created_by: session.telegram_id || null
+            };
+            const orgResponse = await env.crmApi.fetch(new Request(
+              `${env.CRM_API_URL}/neworg`,
+              {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                body: JSON.stringify(orgPayload)
+              }
+            ));
+            if (!orgResponse.ok) {
+              await sendMessage(env, chatId, `Failed to add organization: ${orgResponse.statusText || orgResponse.status}`);
+              return;
+            }
+            // 2. Get organization id (search by name)
+            let orgId = null;
+            try {
+              const searchUrl = `${env.CRM_API_URL}/organizations/search?name=${encodeURIComponent(session.organization)}`;
+              const searchRes = await env.crmApi.fetch(new Request(
+                searchUrl,
+                { method: "GET", headers: { "Authorization": `Bearer ${env.API_TOKEN}` } }
+              ));
+              if (searchRes.ok) {
+                const orgs = await searchRes.json();
+                if (Array.isArray(orgs)) {
+                  orgId = orgs.find(o =>
+                    o.name === session.organization
+                  )?.id;
+                }
+              }
+            } catch (e) {
+              // fallback: orgId remains null
+            }
+            if (!orgId) {
+              await sendMessage(env, chatId, "Organization created, but could not retrieve organization ID. Contact not added.");
+              return;
+            }
+            // 3. Add contact with organization_id
+            const contactPayload = {
+              name: session.name,
+              type: session.type,
+              organization_id: orgId,
+              email: session.email || null,
+              phone: session.phone || null,
+              nostr_npub: session.nostr_npub || null,
+              created_by: session.telegram_id || null
+            };
+            const contactResponse = await env.crmApi.fetch(new Request(
+              `${env.CRM_API_URL}/newcontact`,
+              {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                body: JSON.stringify(contactPayload)
+              }
+            ));
+            if (!contactResponse.ok) {
+              await sendMessage(env, chatId, `Failed to add contact: ${contactResponse.statusText || contactResponse.status}`);
+              return;
+            }
+          } catch (e) {
+            await sendMessage(env, chatId, `Error adding contact or organization: ${e.message || e}`);
+            return;
+          }
           setStep(session, "done");
           await persistSession();
-          await sendMessage(env, chatId, "Communities saved. Contact added. (No OSM location found.)");
+          await sendMessage(env, chatId, "Communities saved. Organization and contact added. (No OSM location found.)");
           await removeSession();
         }
         break;
@@ -549,37 +621,81 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
         session.osm_node = selectedOsmId;
       }
 
-      // Add contact and organization (entrepreneur flow)
+      // Add organization first, then contact (entrepreneur flow)
       try {
-        const response = await env.crmApi.fetch(new Request(
+        // 1. Create organization
+        const orgPayload = {
+          name: session.organization,
+          website: session.organization_website || null,
+          nostr_npub: session.organization_nostr_npub || null,
+          location_osm_id: session.osm_node || null,
+          status: "active", // or another default status
+          created_by: session.telegram_id || null
+        };
+        const orgResponse = await env.crmApi.fetch(new Request(
+          `${env.CRM_API_URL}/neworg`,
+          {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+            body: JSON.stringify(orgPayload)
+          }
+        ));
+        if (!orgResponse.ok) {
+          await sendMessage(env, chatId, `Failed to add organization: ${orgResponse.statusText || orgResponse.status}`);
+          return;
+        }
+        // 2. Get organization id (search by name, website, and OSM id)
+        let orgId = null;
+        try {
+          const searchUrl = `${env.CRM_API_URL}/organizations/search?name=${encodeURIComponent(session.organization)}`;
+          const searchRes = await env.crmApi.fetch(new Request(
+            searchUrl,
+            { method: "GET", headers: { "Authorization": `Bearer ${env.API_TOKEN}` } }
+          ));
+          if (searchRes.ok) {
+            const orgs = await searchRes.json();
+            // Try to find the org with matching name and OSM id (if available)
+            if (Array.isArray(orgs)) {
+              orgId = orgs.find(o =>
+                o.name === session.organization &&
+                (session.osm_node ? String(o.location_osm_id) === String(session.osm_node) : true)
+              )?.id;
+            }
+          }
+        } catch (e) {
+          // fallback: orgId remains null
+        }
+        if (!orgId) {
+          await sendMessage(env, chatId, "Organization created, but could not retrieve organization ID. Contact not added.");
+          return;
+        }
+        // 3. Add contact with organization_id
+        const contactPayload = {
+          name: session.name,
+          type: session.type,
+          organization_id: orgId,
+          email: session.email || null,
+          phone: session.phone || null,
+          nostr_npub: session.nostr_npub || null,
+          created_by: session.telegram_id || null
+        };
+        const contactResponse = await env.crmApi.fetch(new Request(
           `${env.CRM_API_URL}/newcontact`,
           {
             method: "POST",
             headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: session.name,
-              type: session.type,
-              organization: session.organization,
-              organization_website: session.organization_website,
-              organization_nostr_npub: session.organization_nostr_npub,
-              osm_node: session.osm_node,
-              email: session.email || null,
-              phone: session.phone || null,
-              nostr_npub: session.nostr_npub || null,
-              created_by: session.telegram_id || null,
-              selected_communities: session.selected_communities || []
-            })
+            body: JSON.stringify(contactPayload)
           }
         ));
-        if (!response.ok) {
-          await sendMessage(env, chatId, `Failed to add contact: ${response.statusText || response.status}`);
+        if (!contactResponse.ok) {
+          await sendMessage(env, chatId, `Failed to add contact: ${contactResponse.statusText || contactResponse.status}`);
           return;
         }
       } catch (e) {
-        await sendMessage(env, chatId, `Error adding contact: ${e.message || e}`);
+        await sendMessage(env, chatId, `Error adding contact or organization: ${e.message || e}`);
         return;
       }
-      await sendMessage(env, chatId, "OpenStreetMap node selected. Contact added.");
+      await sendMessage(env, chatId, "OpenStreetMap node selected. Organization and contact added.");
       setStep(session, "done");
       await persistSession();
       await removeSession();
