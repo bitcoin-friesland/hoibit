@@ -167,9 +167,15 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
         (session.last_callback_data && session.last_callback_data.startsWith("select_org:"))
       ) {
         session.organization = org;
-        setStep(session, "awaiting_org_website");
+        setStep(session, "awaiting_org_status");
         await persistSession();
-        const prompt = promptWithSkip("What is the website of the organization? (optional)");
+        const statusOptions = [
+          { label: "BTC-curious", value: "btc-curious" },
+          { label: "Accepts Bitcoin", value: "accepts-bitcoin" },
+          { label: "Not interested", value: "not-interested" },
+          { label: "Stopped accepting", value: "stopped-accepting" }
+        ];
+        const prompt = promptWithOptions("What is the Bitcoin adoption status of the organization?", statusOptions);
         await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
         return;
       }
@@ -210,6 +216,28 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
         await sendMessage(env, chatId, errorMessage(`Exception during org search: ${e && e.message ? e.message : e}`));
       }
       await persistSession();
+      break;
+    }
+    case "awaiting_org_status": {
+      let status = text;
+      if (!status && session.last_callback_data) {
+        status = session.last_callback_data;
+      }
+      const validStatuses = [
+        "btc-curious",
+        "accepts-bitcoin",
+        "not-interested",
+        "stopped-accepting"
+      ];
+      if (!status || !validStatuses.includes(status)) {
+        await sendMessage(env, chatId, errorMessage("Please select a valid Bitcoin adoption status for the organization."));
+        return;
+      }
+      session.organization_status = status;
+      setStep(session, "awaiting_org_website");
+      await persistSession();
+      const prompt = promptWithSkip("What is the website of the organization? (optional)");
+      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
       break;
     }
     case "awaiting_org_website": {
@@ -534,7 +562,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
               website: session.organization_website || null,
               nostr_npub: session.organization_nostr_npub || null,
               location_osm_id: null,
-              status: "active",
+              status: session.organization_status,
               created_by: session.telegram_id || null
             };
             const orgResponse = await env.crmApi.fetch(new Request(
@@ -629,7 +657,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
           website: session.organization_website || null,
           nostr_npub: session.organization_nostr_npub || null,
           location_osm_id: session.osm_node || null,
-          status: "active", // or another default status
+          status: session.organization_status,
           created_by: session.telegram_id || null
         };
         const orgResponse = await env.crmApi.fetch(new Request(
