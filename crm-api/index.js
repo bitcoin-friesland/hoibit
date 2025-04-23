@@ -499,6 +499,51 @@ var index_default = {
         return new Response("Failed to update organization communities", { status: 500 });
       }
     }
+
+    // First user registration: only allowed if no team members exist
+    if (request.method === "POST" && url.pathname === "/first-user") {
+      const data = await request.json();
+      if (!data.telegram_id || !data.name) {
+        return new Response("Missing telegram_id or name", { status: 400 });
+      }
+      try {
+        // Check if any team members exist
+        const countResult = await env.DB.prepare("SELECT COUNT(*) as count FROM team_members").first();
+        if (countResult && countResult.count > 0) {
+          return new Response("First user registration not allowed: team members already exist", { status: 409 });
+        }
+        // Insert new team member (reuse logic from /team_member)
+        const insertQuery = data.time_zone
+          ? `INSERT INTO team_members (telegram_id, name, time_zone) VALUES (?, ?, ?)`
+          : `INSERT INTO team_members (telegram_id, name) VALUES (?, ?)`;
+        const insertParams = data.time_zone
+          ? [data.telegram_id, data.name, data.time_zone]
+          : [data.telegram_id, data.name];
+        const res = await env.DB.prepare(insertQuery).bind(...insertParams).run();
+        const newMember = await env.DB.prepare(
+          `SELECT id FROM team_members WHERE telegram_id = ?`
+        ).bind(data.telegram_id).first();
+        await env.DB.prepare(
+          `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
+        ).bind(
+          "insert",
+          "team_members",
+          newMember.id,
+          null,
+          JSON.stringify({
+            fields: {
+              telegram_id: { old: null, new: data.telegram_id },
+              name: { old: null, new: data.name },
+              ...(data.time_zone ? { time_zone: { old: null, new: data.time_zone } } : {})
+            }
+          })
+        ).run();
+        return Response.json({ id: newMember.id, created: true });
+      } catch (error) {
+        console.error("Error saving first user:", error);
+        return new Response("Failed to add first user", { status: 500 });
+      }
+    }
     return new Response("Not found", { status: 404 });
   }
 };

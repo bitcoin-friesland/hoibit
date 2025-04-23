@@ -15,16 +15,19 @@
 -- This approach ensures robust, future-proof auditing and simplifies reconstructing the full change history for any record.
 
 -- DROP tables in correct order
+DROP TABLE IF EXISTS audit_log;
 DROP TABLE IF EXISTS organization_wallets;
 DROP TABLE IF EXISTS organization_promos;
-DROP TABLE IF EXISTS organizations;
-DROP TABLE IF EXISTS contacts;
+DROP TABLE IF EXISTS organization_communities;
+DROP TABLE IF EXISTS team_member_communities;
+DROP TABLE IF EXISTS organization_notes;
 DROP TABLE IF EXISTS contact_emails;
 DROP TABLE IF EXISTS contact_phones;
 DROP TABLE IF EXISTS contact_notes;
-DROP TABLE IF EXISTS organization_notes;
 DROP TABLE IF EXISTS conversations;
 DROP TABLE IF EXISTS referrals;
+DROP TABLE IF EXISTS contacts;
+DROP TABLE IF EXISTS organizations;
 DROP TABLE IF EXISTS team_members;
 DROP TABLE IF EXISTS bitcoin_communities;
 DROP TABLE IF EXISTS organization_statuses;
