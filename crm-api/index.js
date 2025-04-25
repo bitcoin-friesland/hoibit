@@ -9,7 +9,7 @@ var index_default = {
       }
       try {
         const query = `SELECT * FROM team_members WHERE telegram_id = ?`;
-        const result = await env.DB.prepare(query).bind(telegram_id).all();
+        const result = await env.DB.prepare(query).bind(parseInt(telegram_id, 10)).all();
         const user = result.results && result.results[0];
         if (!user) {
           return new Response("User not found", { status: 404 });
@@ -30,7 +30,7 @@ var index_default = {
       try {
         const oldMember = await env.DB.prepare(
           `SELECT name, time_zone FROM team_members WHERE id = ?`
-        ).bind(data.team_member_id).first();
+        ).bind(parseInt(data.team_member_id, 10)).first();
         let changedFields = {};
         if (data.name || data.time_zone) {
           let setParts = [];
@@ -49,7 +49,7 @@ var index_default = {
               changedFields.time_zone = { old: oldMember.time_zone, new: data.time_zone };
             }
           }
-          params.push(data.team_member_id);
+          params.push(parseInt(data.team_member_id, 10));
           await env.DB.prepare(
             `UPDATE team_members SET ${setParts.join(", ")} WHERE id = ?`
           ).bind(...params).run();
@@ -57,11 +57,11 @@ var index_default = {
         if (Array.isArray(data.community_ids)) {
           await env.DB.prepare(
             `DELETE FROM team_member_communities WHERE team_member_id = ?`
-          ).bind(data.team_member_id).run();
+          ).bind(parseInt(data.team_member_id, 10)).run();
           for (const community_id of data.community_ids) {
             await env.DB.prepare(
               `INSERT INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`
-            ).bind(data.team_member_id, community_id).run();
+            ).bind(parseInt(data.team_member_id, 10), parseInt(community_id, 10)).run();
           }
           changedFields.community_ids = { old: "replaced", new: data.community_ids };
         }
@@ -70,8 +70,8 @@ var index_default = {
         ).bind(
           "update",
           "team_members",
-          data.team_member_id,
-          data.updated_by || null,
+          parseInt(data.team_member_id, 10),
+          data.updated_by ? parseInt(data.updated_by, 10) : null,
           Object.keys(changedFields).length > 0 ? JSON.stringify({ fields: changedFields }) : null
         ).run();
         return new Response("Team member updated", { status: 200 });
@@ -88,33 +88,33 @@ var index_default = {
       try {
         const existing = await env.DB.prepare(
           `SELECT id FROM team_members WHERE telegram_id = ?`
-        ).bind(data.telegram_id).first();
+        ).bind(parseInt(data.telegram_id, 10)).first();
         if (existing) {
           if (Array.isArray(data.community_ids) && data.community_ids.length > 0) {
             for (const community_id of data.community_ids) {
               await env.DB.prepare(
                 `INSERT OR IGNORE INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`
-              ).bind(existing.id, community_id).run();
+              ).bind(parseInt(existing.id, 10), parseInt(community_id, 10)).run();
             }
           }
           if (data.time_zone) {
             await env.DB.prepare(
               `UPDATE team_members SET time_zone = ? WHERE id = ?`
-            ).bind(data.time_zone, existing.id).run();
+            ).bind(data.time_zone, parseInt(existing.id, 10)).run();
           }
           return Response.json({ id: existing.id, existing: true });
         }
         const insertQuery = data.time_zone ? `INSERT INTO team_members (telegram_id, name, time_zone) VALUES (?, ?, ?)` : `INSERT INTO team_members (telegram_id, name) VALUES (?, ?)`;
-        const insertParams = data.time_zone ? [data.telegram_id, data.name, data.time_zone] : [data.telegram_id, data.name];
+        const insertParams = data.time_zone ? [parseInt(data.telegram_id, 10), data.name, data.time_zone] : [parseInt(data.telegram_id, 10), data.name];
         const res = await env.DB.prepare(insertQuery).bind(...insertParams).run();
         const newMember = await env.DB.prepare(
           `SELECT id FROM team_members WHERE telegram_id = ?`
-        ).bind(data.telegram_id).first();
+        ).bind(parseInt(data.telegram_id, 10)).first();
         if (newMember && Array.isArray(data.community_ids) && data.community_ids.length > 0) {
           for (const community_id of data.community_ids) {
             await env.DB.prepare(
               `INSERT INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`
-            ).bind(newMember.id, community_id).run();
+            ).bind(parseInt(newMember.id, 10), parseInt(community_id, 10)).run();
           }
         }
         await env.DB.prepare(
@@ -122,8 +122,8 @@ var index_default = {
         ).bind(
           "insert",
           "team_members",
-          newMember.id,
-          data.invited_by || null,
+          parseInt(newMember.id, 10),
+          data.invited_by ? parseInt(data.invited_by, 10) : null,
           JSON.stringify({
             fields: {
               telegram_id: { old: null, new: data.telegram_id },
@@ -150,15 +150,15 @@ var index_default = {
           contactParams = [
             data.name,
             data.type,
-            data.organization_id || null,
-            data.community_id
+            data.organization_id ? parseInt(data.organization_id, 10) : null,
+            parseInt(data.community_id, 10)
           ];
         } else {
           insertContactQuery = `INSERT INTO contacts (name, type, organization_id) VALUES (?, ?, ?)`;
           contactParams = [
             data.name,
             data.type,
-            data.organization_id || null
+            data.organization_id ? parseInt(data.organization_id, 10) : null
           ];
         }
         const contactRes = await env.DB.prepare(insertContactQuery).bind(...contactParams).run();
@@ -170,7 +170,7 @@ var index_default = {
         if (data.email) {
           const insertEmailQuery = `INSERT INTO contact_emails (contact_id, email) VALUES (?, ?)`;
           await env.DB.prepare(insertEmailQuery).bind(
-            contactId,
+            parseInt(contactId, 10),
             data.email
           ).run();
         }
@@ -179,14 +179,14 @@ var index_default = {
         ).bind(
           "insert",
           "contacts",
-          contactId,
-          data.created_by || null,
+          parseInt(contactId, 10),
+          data.created_by ? parseInt(data.created_by, 10) : null,
           JSON.stringify({
             fields: {
               name: { old: null, new: data.name },
               type: { old: null, new: data.type },
-              organization_id: { old: null, new: data.organization_id || null },
-              ...data.community_id ? { community_id: { old: null, new: data.community_id } } : {},
+              organization_id: { old: null, new: data.organization_id ? parseInt(data.organization_id, 10) : null },
+              ...data.community_id ? { community_id: { old: null, new: parseInt(data.community_id, 10) } } : {},
               ...data.email ? { email: { old: null, new: data.email } } : {}
             }
           })
@@ -215,21 +215,21 @@ var index_default = {
           ...data.location_osm_id ? [data.name, data.status, data.location_osm_id] : [data.name, data.status]
         ).first();
         if (orgIdResult && orgIdResult.id) {
-          await env.DB.prepare(
-            `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-          ).bind(
-            "insert",
-            "organizations",
-            parseInt(orgIdResult.id, 10),
-            data.created_by || null,
-            JSON.stringify({
-              fields: {
-                name: { old: null, new: data.name },
-                status: { old: null, new: data.status },
-                ...data.location_osm_id ? { location_osm_id: { old: null, new: data.location_osm_id } } : {}
-              }
-            })
-          ).run();
+        await env.DB.prepare(
+          `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
+        ).bind(
+          "insert",
+          "organizations",
+          parseInt(orgIdResult.id, 10),
+          data.created_by ? parseInt(data.created_by, 10) : null,
+          JSON.stringify({
+            fields: {
+              name: { old: null, new: data.name },
+              status: { old: null, new: data.status },
+              ...data.location_osm_id ? { location_osm_id: { old: null, new: data.location_osm_id } } : {}
+            }
+          })
+        ).run();
         }
         return new Response("Organization added successfully");
       } catch (error) {
@@ -248,24 +248,24 @@ var index_default = {
         }
         const insertQuery = `INSERT INTO conversations (contact_id, channel, note, created_by) VALUES (?, ?, ?, ?)`;
         const res = await env.DB.prepare(insertQuery).bind(
-          data.contact_id,
+          parseInt(data.contact_id, 10),
           data.channel,
           data.note,
-          data.created_by
+          data.created_by ? parseInt(data.created_by, 10) : null
         ).run();
         await env.DB.prepare(
           `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
         ).bind(
           "insert",
           "conversations",
-          data.contact_id,
-          data.created_by || null,
+          parseInt(data.contact_id, 10),
+          data.created_by ? parseInt(data.created_by, 10) : null,
           JSON.stringify({
             fields: {
-              contact_id: { old: null, new: data.contact_id },
+              contact_id: { old: null, new: parseInt(data.contact_id, 10) },
               channel: { old: null, new: data.channel },
               note: { old: null, new: data.note },
-              created_by: { old: null, new: data.created_by }
+              created_by: { old: null, new: data.created_by ? parseInt(data.created_by, 10) : null }
             }
           })
         ).run();
@@ -283,16 +283,16 @@ var index_default = {
       try {
         const oldMember = await env.DB.prepare(
           `SELECT id, telegram_id, name, time_zone FROM team_members WHERE telegram_id = ?`
-        ).bind(telegram_id).first();
+        ).bind(parseInt(telegram_id, 10)).first();
         const deleteQuery = `DELETE FROM team_members WHERE telegram_id = ?`;
-        const res = await env.DB.prepare(deleteQuery).bind(telegram_id).run();
+        const res = await env.DB.prepare(deleteQuery).bind(parseInt(telegram_id, 10)).run();
         if (oldMember && oldMember.id) {
           await env.DB.prepare(
             `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
           ).bind(
             "delete",
             "team_members",
-            oldMember.id,
+            parseInt(oldMember.id, 10),
             null,
             JSON.stringify({
               fields: {
@@ -327,7 +327,7 @@ var index_default = {
         return new Response("Missing telegram_id", { status: 400 });
       }
       try {
-        const member = await env.DB.prepare("SELECT id FROM team_members WHERE telegram_id = ?").bind(telegram_id).first();
+        const member = await env.DB.prepare("SELECT id FROM team_members WHERE telegram_id = ?").bind(parseInt(telegram_id, 10)).first();
         if (!member || !member.id) {
           return new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } });
         }
@@ -336,7 +336,7 @@ var index_default = {
           FROM team_member_communities tmc
           JOIN bitcoin_communities c ON tmc.community_id = c.id
           WHERE tmc.team_member_id = ?
-        `).bind(member.id).all();
+        `).bind(parseInt(member.id, 10)).all();
         console.log("team_member_communities result:", JSON.stringify(result.results));
         return new Response(JSON.stringify(result.results), {
           headers: { "Content-Type": "application/json" }
@@ -406,7 +406,7 @@ var index_default = {
         LEFT JOIN contact_emails ce ON o.id = ce.contact_id
         WHERE 1=1
       `;
-      const params = [community_id || null];
+      const params = [community_id ? parseInt(community_id, 10) : null];
       if (domain) {
         query += " AND o.website LIKE ?";
         params.push(`%${domain}%`);
@@ -477,12 +477,12 @@ var index_default = {
         // Delete existing associations
         await env.DB.prepare(
           `DELETE FROM organization_communities WHERE organization_id = ?`
-        ).bind(data.organization_id).run();
+        ).bind(parseInt(data.organization_id, 10)).run();
         // Insert new associations
         for (const community_id of data.community_ids) {
           await env.DB.prepare(
             `INSERT INTO organization_communities (organization_id, community_id) VALUES (?, ?)`
-          ).bind(data.organization_id, community_id).run();
+          ).bind(parseInt(data.organization_id, 10), parseInt(community_id, 10)).run();
         }
         return new Response("Organization communities updated", { status: 200 });
       } catch (error) {
@@ -511,14 +511,14 @@ var index_default = {
           ? `INSERT INTO team_members (telegram_id, name, time_zone) VALUES (?, ?, ?)`
           : `INSERT INTO team_members (telegram_id, name) VALUES (?, ?)`;
         const insertParams = data.time_zone
-          ? [data.telegram_id, data.name, data.time_zone]
-          : [data.telegram_id, data.name];
+          ? [parseInt(data.telegram_id, 10), data.name, data.time_zone]
+          : [parseInt(data.telegram_id, 10), data.name];
         console.log("First user registration: insertQuery and params", { insertQuery, insertParams });
         const res = await env.DB.prepare(insertQuery).bind(...insertParams).run();
         console.log("First user registration: insert result", { res });
         const newMember = await env.DB.prepare(
           `SELECT id FROM team_members WHERE telegram_id = ?`
-        ).bind(data.telegram_id).first();
+        ).bind(parseInt(data.telegram_id, 10)).first();
         console.log("First user registration: newMember select result", { newMember });
         await env.DB.prepare(
           `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
