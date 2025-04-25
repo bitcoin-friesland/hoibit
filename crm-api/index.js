@@ -484,15 +484,6 @@ var index_default = {
             `INSERT INTO organization_communities (organization_id, community_id) VALUES (?, ?)`
           ).bind(data.organization_id, community_id).run();
         }
-        await env.DB.prepare(
-          `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-        ).bind(
-          "update",
-          "organization_communities",
-          data.organization_id,
-          data.updated_by || null,
-          JSON.stringify({ community_ids: data.community_ids })
-        ).run();
         return new Response("Organization communities updated", { status: 200 });
       } catch (error) {
         console.error("Error updating organization communities:", error);
@@ -534,7 +525,7 @@ var index_default = {
         ).bind(
           "insert",
           "team_members",
-          newMember.id,
+          parseInt(newMember.id, 10),
           null,
           JSON.stringify({
             fields: {
