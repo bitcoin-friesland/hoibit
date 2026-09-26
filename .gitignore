@@ -15,3 +15,7 @@ build/
 
 # Others
 schema.sql
+
+# Operating-system metadata (does not untrack existing files)
+Thumbs.db
+desktop.ini
