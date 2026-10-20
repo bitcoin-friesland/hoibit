@@ -4,3 +4,4 @@ node_modules/
 .clinerules/
 dist/
 package-lock.json
+worker-configuration.d.ts

@@ -1,7 +1,7 @@
 name = "crm-api"
 account_id = "e6bb99fcf594d0451bd02dcf63a73b26"
 compatibility_date = "2026-10-01"
-main = "index.js"
+main = "src/index.ts"
 
 # Only reachable via the crmApi service binding from telegram-crm.
 # crm-api has no authentication, so it must never get a public URL.
