@@ -159,58 +159,56 @@ var index_default = {
     }
     if (request.method === "POST" && url.pathname === "/newcontact") {
       const data = await request.json();
+      if (!data.name || !data.type) {
+        return new Response("Missing required fields: name or type", { status: 400 });
+      }
       try {
-        if (!data.name || !data.type) {
-          return new Response("Missing required fields: name or type", { status: 400 });
-        }
-        let insertContactQuery, contactParams;
-        if (data.community_id) {
-          insertContactQuery = `INSERT INTO contacts (name, type, organization_id, community_id) VALUES (?, ?, ?, ?)`;
-          contactParams = [
+        // One transaction: contact, email, phone and audit entry. The new id is read from
+        // sqlite_sequence (contacts uses AUTOINCREMENT), so later statements can reference it.
+        const contactIdSql = `(SELECT seq FROM sqlite_sequence WHERE name = 'contacts')`;
+        const statements = [
+          env.DB.prepare(
+            `INSERT INTO contacts (name, type, organization_id, nostr_npub) VALUES (?, ?, ?, ?)`
+          ).bind(
             data.name,
             data.type,
             data.organization_id ? parseInt(data.organization_id, 10) : null,
-            parseInt(data.community_id, 10)
-          ];
-        } else {
-          insertContactQuery = `INSERT INTO contacts (name, type, organization_id) VALUES (?, ?, ?)`;
-          contactParams = [
-            data.name,
-            data.type,
-            data.organization_id ? parseInt(data.organization_id, 10) : null
-          ];
-        }
-        const contactRes = await env.DB.prepare(insertContactQuery).bind(...contactParams).run();
-        if (!contactRes || !contactRes.lastInsertRowid) {
-          console.error("Insert contact failed, no lastInsertRowid returned");
-          return new Response("Failed to add contact", { status: 500 });
-        }
-        const contactId = contactRes.lastInsertRowid;
+            data.nostr_npub || null
+          )
+        ];
         if (data.email) {
-          const insertEmailQuery = `INSERT INTO contact_emails (contact_id, email) VALUES (?, ?)`;
-          await env.DB.prepare(insertEmailQuery).bind(
-            parseInt(contactId, 10),
-            data.email
-          ).run();
+          statements.push(env.DB.prepare(
+            `INSERT INTO contact_emails (contact_id, email) VALUES (${contactIdSql}, ?)`
+          ).bind(data.email));
         }
-        await env.DB.prepare(
-          `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-        ).bind(
-          "insert",
-          "contacts",
-          String(contactId),
-          data.created_by ? parseInt(data.created_by, 10) : null,
-          JSON.stringify({
-            fields: {
-              name: { old: null, new: data.name },
-              type: { old: null, new: data.type },
-              organization_id: { old: null, new: data.organization_id ? parseInt(data.organization_id, 10) : null },
-              ...data.community_id ? { community_id: { old: null, new: parseInt(data.community_id, 10) } } : {},
-              ...data.email ? { email: { old: null, new: data.email } } : {}
-            }
-          })
-        ).run();
-        return new Response("Contact added successfully");
+        if (data.phone) {
+          statements.push(env.DB.prepare(
+            `INSERT INTO contact_phones (contact_id, phone) VALUES (${contactIdSql}, ?)`
+          ).bind(data.phone));
+        }
+        statements.push(
+          env.DB.prepare(
+            `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, CAST(${contactIdSql} AS TEXT), ?, ?)`
+          ).bind(
+            "insert",
+            "contacts",
+            data.created_by ? parseInt(data.created_by, 10) : null,
+            JSON.stringify({
+              fields: {
+                name: { old: null, new: data.name },
+                type: { old: null, new: data.type },
+                organization_id: { old: null, new: data.organization_id ? parseInt(data.organization_id, 10) : null },
+                ...data.nostr_npub ? { nostr_npub: { old: null, new: data.nostr_npub } } : {},
+                ...data.email ? { email: { old: null, new: data.email } } : {},
+                ...data.phone ? { phone: { old: null, new: data.phone } } : {}
+              }
+            })
+          ),
+          env.DB.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'contacts'`)
+        );
+        const results = await env.DB.batch(statements);
+        const id = results[results.length - 1].results[0].id;
+        return Response.json({ id, created: true });
       } catch (error) {
         console.error("Error saving contact:", error);
         return new Response("Failed to add contact", { status: 500 });
@@ -218,39 +216,48 @@ var index_default = {
     }
     if (request.method === "POST" && url.pathname === "/neworg") {
       const data = await request.json();
+      if (!data.name || !data.status) {
+        return new Response("Missing required fields: name or status", { status: 400 });
+      }
       try {
-        let insertQuery, insertParams;
-        if (data.location_osm_id) {
-          insertQuery = `INSERT INTO organizations (name, status, location_osm_id) VALUES (?, ?, ?)`;
-          insertParams = [data.name, data.status, data.location_osm_id];
-        } else {
-          insertQuery = `INSERT INTO organizations (name, status) VALUES (?, ?)`;
-          insertParams = [data.name, data.status];
-        }
-        const res = await env.DB.prepare(insertQuery).bind(...insertParams).run();
-        const orgIdResult = await env.DB.prepare(
-          data.location_osm_id ? `SELECT id FROM organizations WHERE name = ? AND status = ? AND location_osm_id = ? ORDER BY id DESC LIMIT 1` : `SELECT id FROM organizations WHERE name = ? AND status = ? ORDER BY id DESC LIMIT 1`
-        ).bind(
-          ...data.location_osm_id ? [data.name, data.status, data.location_osm_id] : [data.name, data.status]
-        ).first();
-        if (orgIdResult && orgIdResult.id) {
-        await env.DB.prepare(
-          `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-        ).bind(
-          "insert",
-          "organizations",
-          String(orgIdResult.id),
-          data.created_by ? parseInt(data.created_by, 10) : null,
-          JSON.stringify({
-            fields: {
-              name: { old: null, new: data.name },
-              status: { old: null, new: data.status },
-              ...data.location_osm_id ? { location_osm_id: { old: null, new: data.location_osm_id } } : {}
-            }
-          })
-        ).run();
-        }
-        return new Response("Organization added successfully");
+        // One transaction: organization, its communities and the audit entry (see /newcontact).
+        const orgIdSql = `(SELECT seq FROM sqlite_sequence WHERE name = 'organizations')`;
+        const communityIds = Array.isArray(data.community_ids) ? data.community_ids.map(id => parseInt(id, 10)) : [];
+        const statements = [
+          env.DB.prepare(
+            `INSERT INTO organizations (name, status, location_osm_id, website, nostr_npub) VALUES (?, ?, ?, ?, ?)`
+          ).bind(
+            data.name,
+            parseInt(data.status, 10),
+            data.location_osm_id ? String(data.location_osm_id) : null,
+            data.website || null,
+            data.nostr_npub || null
+          ),
+          ...communityIds.map(communityId => env.DB.prepare(
+            `INSERT INTO organization_communities (organization_id, community_id) VALUES (${orgIdSql}, ?)`
+          ).bind(communityId)),
+          env.DB.prepare(
+            `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, CAST(${orgIdSql} AS TEXT), ?, ?)`
+          ).bind(
+            "insert",
+            "organizations",
+            data.created_by ? parseInt(data.created_by, 10) : null,
+            JSON.stringify({
+              fields: {
+                name: { old: null, new: data.name },
+                status: { old: null, new: parseInt(data.status, 10) },
+                ...data.location_osm_id ? { location_osm_id: { old: null, new: String(data.location_osm_id) } } : {},
+                ...data.website ? { website: { old: null, new: data.website } } : {},
+                ...data.nostr_npub ? { nostr_npub: { old: null, new: data.nostr_npub } } : {},
+                ...communityIds.length > 0 ? { community_ids: { old: null, new: communityIds } } : {}
+              }
+            })
+          ),
+          env.DB.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'organizations'`)
+        ];
+        const results = await env.DB.batch(statements);
+        const id = results[results.length - 1].results[0].id;
+        return Response.json({ id, created: true });
       } catch (error) {
         console.error("Error saving organization:", error);
         return new Response("Failed to add organization", { status: 500 });
@@ -404,7 +411,7 @@ var index_default = {
       try {
         const urlObj = new URL(request.url);
         const country = urlObj.searchParams.get("country");
-        let query = "SELECT id, name, country FROM bitcoin_communities";
+        let query = "SELECT id, name, country, region FROM bitcoin_communities";
         const params = [];
         if (country) {
           query += " WHERE country = ?";
