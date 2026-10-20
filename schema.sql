@@ -242,3 +242,37 @@ CREATE INDEX idx_contacts_type ON contacts(type);
 CREATE INDEX idx_organizations_status ON organizations(status);
 CREATE INDEX idx_conversations_contact_id ON conversations(contact_id);
 CREATE INDEX idx_audit_table ON audit_log(table_name);
+
+-- ID guards: these TEXT columns hold integer IDs. Binding a JS number stores
+-- a REAL as e.g. '11524164.0', which never matches lookups. Digits only.
+CREATE TRIGGER IF NOT EXISTS team_members_telegram_id_digits_insert
+BEFORE INSERT ON team_members
+WHEN NEW.telegram_id IS NOT NULL
+  AND (CAST(NEW.telegram_id AS TEXT) = '' OR CAST(NEW.telegram_id AS TEXT) GLOB '*[^0-9]*')
+BEGIN
+  SELECT RAISE(ABORT, 'team_members.telegram_id must contain digits only; bind it as a string');
+END;
+
+CREATE TRIGGER IF NOT EXISTS team_members_telegram_id_digits_update
+BEFORE UPDATE OF telegram_id ON team_members
+WHEN NEW.telegram_id IS NOT NULL
+  AND (CAST(NEW.telegram_id AS TEXT) = '' OR CAST(NEW.telegram_id AS TEXT) GLOB '*[^0-9]*')
+BEGIN
+  SELECT RAISE(ABORT, 'team_members.telegram_id must contain digits only; bind it as a string');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_log_record_id_digits_insert
+BEFORE INSERT ON audit_log
+WHEN NEW.record_id IS NOT NULL
+  AND (CAST(NEW.record_id AS TEXT) = '' OR CAST(NEW.record_id AS TEXT) GLOB '*[^0-9]*')
+BEGIN
+  SELECT RAISE(ABORT, 'audit_log.record_id must contain digits only; bind it as a string');
+END;
+
+CREATE TRIGGER IF NOT EXISTS audit_log_record_id_digits_update
+BEFORE UPDATE OF record_id ON audit_log
+WHEN NEW.record_id IS NOT NULL
+  AND (CAST(NEW.record_id AS TEXT) = '' OR CAST(NEW.record_id AS TEXT) GLOB '*[^0-9]*')
+BEGIN
+  SELECT RAISE(ABORT, 'audit_log.record_id must contain digits only; bind it as a string');
+END;

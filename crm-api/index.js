@@ -70,7 +70,7 @@ var index_default = {
         ).bind(
           "update",
           "team_members",
-          parseInt(data.team_member_id, 10),
+          String(data.team_member_id),
           data.updated_by ? parseInt(data.updated_by, 10) : null,
           Object.keys(changedFields).length > 0 ? JSON.stringify({ fields: changedFields }) : null
         ).run();
@@ -122,7 +122,7 @@ var index_default = {
         ).bind(
           "insert",
           "team_members",
-          parseInt(newMember.id, 10),
+          String(newMember.id),
           data.invited_by ? parseInt(data.invited_by, 10) : null,
           JSON.stringify({
             fields: {
@@ -179,7 +179,7 @@ var index_default = {
         ).bind(
           "insert",
           "contacts",
-          parseInt(contactId, 10),
+          String(contactId),
           data.created_by ? parseInt(data.created_by, 10) : null,
           JSON.stringify({
             fields: {
@@ -220,7 +220,7 @@ var index_default = {
         ).bind(
           "insert",
           "organizations",
-          parseInt(orgIdResult.id, 10),
+          String(orgIdResult.id),
           data.created_by ? parseInt(data.created_by, 10) : null,
           JSON.stringify({
             fields: {
@@ -258,7 +258,7 @@ var index_default = {
         ).bind(
           "insert",
           "conversations",
-          parseInt(data.contact_id, 10),
+          String(data.contact_id),
           data.created_by ? parseInt(data.created_by, 10) : null,
           JSON.stringify({
             fields: {
@@ -292,7 +292,7 @@ var index_default = {
           ).bind(
             "delete",
             "team_members",
-            parseInt(oldMember.id, 10),
+            String(oldMember.id),
             null,
             JSON.stringify({
               fields: {
@@ -525,7 +525,7 @@ var index_default = {
         ).bind(
           "insert",
           "team_members",
-          parseInt(newMember.id, 10),
+          String(newMember.id),
           null,
           JSON.stringify({
             fields: {
