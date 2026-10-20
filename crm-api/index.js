@@ -3,13 +3,13 @@
 // Only admins (team_members.is_admin = 1) may add team members or change admin rights.
 async function isAdmin(env, teamMemberId) {
   if (!teamMemberId) return false;
-  const row = await env.DB.prepare(
-    `SELECT is_admin FROM team_members WHERE id = ?`
-  ).bind(parseInt(teamMemberId, 10)).first();
+  const row = await env.DB.prepare(`SELECT is_admin FROM team_members WHERE id = ?`)
+    .bind(parseInt(teamMemberId, 10))
+    .first();
   return !!row && row.is_admin === 1;
 }
 
-var index_default = {
+export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/validate-user") {
@@ -41,9 +41,9 @@ var index_default = {
         if (!(await isAdmin(env, data.updated_by))) {
           return new Response("Only admins can update team members", { status: 403 });
         }
-        const oldMember = await env.DB.prepare(
-          `SELECT name, time_zone FROM team_members WHERE id = ?`
-        ).bind(parseInt(data.team_member_id, 10)).first();
+        const oldMember = await env.DB.prepare(`SELECT name, time_zone FROM team_members WHERE id = ?`)
+          .bind(parseInt(data.team_member_id, 10))
+          .first();
         if (!oldMember) {
           return new Response("Team member not found", { status: 404 });
         }
@@ -66,30 +66,32 @@ var index_default = {
             }
           }
           params.push(parseInt(data.team_member_id, 10));
-          await env.DB.prepare(
-            `UPDATE team_members SET ${setParts.join(", ")} WHERE id = ?`
-          ).bind(...params).run();
+          await env.DB.prepare(`UPDATE team_members SET ${setParts.join(", ")} WHERE id = ?`)
+            .bind(...params)
+            .run();
         }
         if (Array.isArray(data.community_ids)) {
-          await env.DB.prepare(
-            `DELETE FROM team_member_communities WHERE team_member_id = ?`
-          ).bind(parseInt(data.team_member_id, 10)).run();
+          await env.DB.prepare(`DELETE FROM team_member_communities WHERE team_member_id = ?`)
+            .bind(parseInt(data.team_member_id, 10))
+            .run();
           for (const community_id of data.community_ids) {
-            await env.DB.prepare(
-              `INSERT INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`
-            ).bind(parseInt(data.team_member_id, 10), parseInt(community_id, 10)).run();
+            await env.DB.prepare(`INSERT INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`)
+              .bind(parseInt(data.team_member_id, 10), parseInt(community_id, 10))
+              .run();
           }
           changedFields.community_ids = { old: "replaced", new: data.community_ids };
         }
         await env.DB.prepare(
           `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-        ).bind(
-          "update",
-          "team_members",
-          String(data.team_member_id),
-          data.updated_by ? parseInt(data.updated_by, 10) : null,
-          Object.keys(changedFields).length > 0 ? JSON.stringify({ fields: changedFields }) : null
-        ).run();
+        )
+          .bind(
+            "update",
+            "team_members",
+            String(data.team_member_id),
+            data.updated_by ? parseInt(data.updated_by, 10) : null,
+            Object.keys(changedFields).length > 0 ? JSON.stringify({ fields: changedFields }) : null
+          )
+          .run();
         return new Response("Team member updated", { status: 200 });
       } catch (error) {
         console.error("Error updating team member:", error);
@@ -105,52 +107,62 @@ var index_default = {
         if (!(await isAdmin(env, data.invited_by))) {
           return new Response("Only admins can add team members", { status: 403 });
         }
-        const existing = await env.DB.prepare(
-          `SELECT id FROM team_members WHERE telegram_id = ?`
-        ).bind(String(data.telegram_id)).first();
+        const existing = await env.DB.prepare(`SELECT id FROM team_members WHERE telegram_id = ?`)
+          .bind(String(data.telegram_id))
+          .first();
         if (existing) {
           if (Array.isArray(data.community_ids) && data.community_ids.length > 0) {
             for (const community_id of data.community_ids) {
               await env.DB.prepare(
                 `INSERT OR IGNORE INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`
-              ).bind(parseInt(existing.id, 10), parseInt(community_id, 10)).run();
+              )
+                .bind(parseInt(existing.id, 10), parseInt(community_id, 10))
+                .run();
             }
           }
           if (data.time_zone) {
-            await env.DB.prepare(
-              `UPDATE team_members SET time_zone = ? WHERE id = ?`
-            ).bind(data.time_zone, parseInt(existing.id, 10)).run();
+            await env.DB.prepare(`UPDATE team_members SET time_zone = ? WHERE id = ?`)
+              .bind(data.time_zone, parseInt(existing.id, 10))
+              .run();
           }
           return Response.json({ id: existing.id, existing: true });
         }
-        const insertQuery = data.time_zone ? `INSERT INTO team_members (telegram_id, name, time_zone) VALUES (?, ?, ?)` : `INSERT INTO team_members (telegram_id, name) VALUES (?, ?)`;
-        const insertParams = data.time_zone ? [String(data.telegram_id), data.name, data.time_zone] : [String(data.telegram_id), data.name];
-        const res = await env.DB.prepare(insertQuery).bind(...insertParams).run();
-        const newMember = await env.DB.prepare(
-          `SELECT id FROM team_members WHERE telegram_id = ?`
-        ).bind(String(data.telegram_id)).first();
+        const insertQuery = data.time_zone
+          ? `INSERT INTO team_members (telegram_id, name, time_zone) VALUES (?, ?, ?)`
+          : `INSERT INTO team_members (telegram_id, name) VALUES (?, ?)`;
+        const insertParams = data.time_zone
+          ? [String(data.telegram_id), data.name, data.time_zone]
+          : [String(data.telegram_id), data.name];
+        const res = await env.DB.prepare(insertQuery)
+          .bind(...insertParams)
+          .run();
+        const newMember = await env.DB.prepare(`SELECT id FROM team_members WHERE telegram_id = ?`)
+          .bind(String(data.telegram_id))
+          .first();
         if (newMember && Array.isArray(data.community_ids) && data.community_ids.length > 0) {
           for (const community_id of data.community_ids) {
-            await env.DB.prepare(
-              `INSERT INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`
-            ).bind(parseInt(newMember.id, 10), parseInt(community_id, 10)).run();
+            await env.DB.prepare(`INSERT INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`)
+              .bind(parseInt(newMember.id, 10), parseInt(community_id, 10))
+              .run();
           }
         }
         await env.DB.prepare(
           `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-        ).bind(
-          "insert",
-          "team_members",
-          String(newMember.id),
-          data.invited_by ? parseInt(data.invited_by, 10) : null,
-          JSON.stringify({
-            fields: {
-              telegram_id: { old: null, new: data.telegram_id },
-              name: { old: null, new: data.name },
-              ...data.time_zone ? { time_zone: { old: null, new: data.time_zone } } : {}
-            }
-          })
-        ).run();
+        )
+          .bind(
+            "insert",
+            "team_members",
+            String(newMember.id),
+            data.invited_by ? parseInt(data.invited_by, 10) : null,
+            JSON.stringify({
+              fields: {
+                telegram_id: { old: null, new: data.telegram_id },
+                name: { old: null, new: data.name },
+                ...(data.time_zone ? { time_zone: { old: null, new: data.time_zone } } : {})
+              }
+            })
+          )
+          .run();
         return Response.json({ id: newMember.id, created: true });
       } catch (error) {
         console.error("Error saving team member:", error);
@@ -167,9 +179,7 @@ var index_default = {
         // sqlite_sequence (contacts uses AUTOINCREMENT), so later statements can reference it.
         const contactIdSql = `(SELECT seq FROM sqlite_sequence WHERE name = 'contacts')`;
         const statements = [
-          env.DB.prepare(
-            `INSERT INTO contacts (name, type, organization_id, nostr_npub) VALUES (?, ?, ?, ?)`
-          ).bind(
+          env.DB.prepare(`INSERT INTO contacts (name, type, organization_id, nostr_npub) VALUES (?, ?, ?, ?)`).bind(
             data.name,
             data.type,
             data.organization_id ? parseInt(data.organization_id, 10) : null,
@@ -177,14 +187,18 @@ var index_default = {
           )
         ];
         if (data.email) {
-          statements.push(env.DB.prepare(
-            `INSERT INTO contact_emails (contact_id, email) VALUES (${contactIdSql}, ?)`
-          ).bind(data.email));
+          statements.push(
+            env.DB.prepare(`INSERT INTO contact_emails (contact_id, email) VALUES (${contactIdSql}, ?)`).bind(
+              data.email
+            )
+          );
         }
         if (data.phone) {
-          statements.push(env.DB.prepare(
-            `INSERT INTO contact_phones (contact_id, phone) VALUES (${contactIdSql}, ?)`
-          ).bind(data.phone));
+          statements.push(
+            env.DB.prepare(`INSERT INTO contact_phones (contact_id, phone) VALUES (${contactIdSql}, ?)`).bind(
+              data.phone
+            )
+          );
         }
         statements.push(
           env.DB.prepare(
@@ -198,9 +212,9 @@ var index_default = {
                 name: { old: null, new: data.name },
                 type: { old: null, new: data.type },
                 organization_id: { old: null, new: data.organization_id ? parseInt(data.organization_id, 10) : null },
-                ...data.nostr_npub ? { nostr_npub: { old: null, new: data.nostr_npub } } : {},
-                ...data.email ? { email: { old: null, new: data.email } } : {},
-                ...data.phone ? { phone: { old: null, new: data.phone } } : {}
+                ...(data.nostr_npub ? { nostr_npub: { old: null, new: data.nostr_npub } } : {}),
+                ...(data.email ? { email: { old: null, new: data.email } } : {}),
+                ...(data.phone ? { phone: { old: null, new: data.phone } } : {})
               }
             })
           ),
@@ -233,9 +247,11 @@ var index_default = {
             data.website || null,
             data.nostr_npub || null
           ),
-          ...communityIds.map(communityId => env.DB.prepare(
-            `INSERT INTO organization_communities (organization_id, community_id) VALUES (${orgIdSql}, ?)`
-          ).bind(communityId)),
+          ...communityIds.map(communityId =>
+            env.DB.prepare(
+              `INSERT INTO organization_communities (organization_id, community_id) VALUES (${orgIdSql}, ?)`
+            ).bind(communityId)
+          ),
           env.DB.prepare(
             `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, CAST(${orgIdSql} AS TEXT), ?, ?)`
           ).bind(
@@ -246,10 +262,10 @@ var index_default = {
               fields: {
                 name: { old: null, new: data.name },
                 status: { old: null, new: parseInt(data.status, 10) },
-                ...data.location_osm_id ? { location_osm_id: { old: null, new: String(data.location_osm_id) } } : {},
-                ...data.website ? { website: { old: null, new: data.website } } : {},
-                ...data.nostr_npub ? { nostr_npub: { old: null, new: data.nostr_npub } } : {},
-                ...communityIds.length > 0 ? { community_ids: { old: null, new: communityIds } } : {}
+                ...(data.location_osm_id ? { location_osm_id: { old: null, new: String(data.location_osm_id) } } : {}),
+                ...(data.website ? { website: { old: null, new: data.website } } : {}),
+                ...(data.nostr_npub ? { nostr_npub: { old: null, new: data.nostr_npub } } : {}),
+                ...(communityIds.length > 0 ? { community_ids: { old: null, new: communityIds } } : {})
               }
             })
           ),
@@ -273,32 +289,38 @@ var index_default = {
           return new Response("Missing channel", { status: 400 });
         }
         const insertQuery = `INSERT INTO conversations (contact_id, channel, note, created_by) VALUES (?, ?, ?, ?)`;
-        const res = await env.DB.prepare(insertQuery).bind(
-          parseInt(data.contact_id, 10),
-          data.channel,
-          data.note,
-          data.created_by ? parseInt(data.created_by, 10) : null
-        ).run();
+        const res = await env.DB.prepare(insertQuery)
+          .bind(
+            parseInt(data.contact_id, 10),
+            data.channel,
+            data.note,
+            data.created_by ? parseInt(data.created_by, 10) : null
+          )
+          .run();
         await env.DB.prepare(
           `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-        ).bind(
-          "insert",
-          "conversations",
-          String(data.contact_id),
-          data.created_by ? parseInt(data.created_by, 10) : null,
-          JSON.stringify({
-            fields: {
-              contact_id: { old: null, new: parseInt(data.contact_id, 10) },
-              channel: { old: null, new: data.channel },
-              note: { old: null, new: data.note },
-              created_by: { old: null, new: data.created_by ? parseInt(data.created_by, 10) : null }
-            }
-          })
-        ).run();
+        )
+          .bind(
+            "insert",
+            "conversations",
+            String(data.contact_id),
+            data.created_by ? parseInt(data.created_by, 10) : null,
+            JSON.stringify({
+              fields: {
+                contact_id: { old: null, new: parseInt(data.contact_id, 10) },
+                channel: { old: null, new: data.channel },
+                note: { old: null, new: data.note },
+                created_by: { old: null, new: data.created_by ? parseInt(data.created_by, 10) : null }
+              }
+            })
+          )
+          .run();
         return new Response("Conversation logged successfully");
       } catch (error) {
         console.error("Error logging conversation:", error);
-        return new Response(`Failed to log conversation: ${error && error.message ? error.message : error}`, { status: 500 });
+        return new Response(`Failed to log conversation: ${error && error.message ? error.message : error}`, {
+          status: 500
+        });
       }
     }
     if (request.method === "POST" && url.pathname === "/delete-team-member") {
@@ -312,29 +334,31 @@ var index_default = {
         }
         const oldMember = await env.DB.prepare(
           `SELECT id, telegram_id, name, time_zone, is_admin FROM team_members WHERE telegram_id = ?`
-        ).bind(String(telegram_id)).first();
+        )
+          .bind(String(telegram_id))
+          .first();
         if (!oldMember) {
           return new Response("Team member not found", { status: 404 });
         }
         if (oldMember.is_admin === 1) {
-          const admins = await env.DB.prepare(
-            `SELECT COUNT(*) AS count FROM team_members WHERE is_admin = 1`
-          ).first();
+          const admins = await env.DB.prepare(`SELECT COUNT(*) AS count FROM team_members WHERE is_admin = 1`).first();
           if (admins.count <= 1) {
             return new Response("Cannot delete the last admin", { status: 409 });
           }
         }
         // audit_log.performed_by references team_members(id); history is kept, so a member
         // who performed audited actions cannot be deleted (foreign key violation).
-        const history = await env.DB.prepare(
-          `SELECT COUNT(*) AS count FROM audit_log WHERE performed_by = ?`
-        ).bind(parseInt(oldMember.id, 10)).first();
+        const history = await env.DB.prepare(`SELECT COUNT(*) AS count FROM audit_log WHERE performed_by = ?`)
+          .bind(parseInt(oldMember.id, 10))
+          .first();
         if (history.count > 0) {
           return new Response("Team member has audit history and cannot be deleted", { status: 409 });
         }
         // One transaction: community links, the member and the audit entry together.
         await env.DB.batch([
-          env.DB.prepare(`DELETE FROM team_member_communities WHERE team_member_id = ?`).bind(parseInt(oldMember.id, 10)),
+          env.DB.prepare(`DELETE FROM team_member_communities WHERE team_member_id = ?`).bind(
+            parseInt(oldMember.id, 10)
+          ),
           env.DB.prepare(`DELETE FROM team_members WHERE id = ?`).bind(parseInt(oldMember.id, 10)),
           env.DB.prepare(
             `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
@@ -377,16 +401,22 @@ var index_default = {
         return new Response("Missing telegram_id", { status: 400 });
       }
       try {
-        const member = await env.DB.prepare("SELECT id FROM team_members WHERE telegram_id = ?").bind(String(telegram_id)).first();
+        const member = await env.DB.prepare("SELECT id FROM team_members WHERE telegram_id = ?")
+          .bind(String(telegram_id))
+          .first();
         if (!member || !member.id) {
           return new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } });
         }
-        const result = await env.DB.prepare(`
+        const result = await env.DB.prepare(
+          `
           SELECT c.id, c.name, c.country, c.region
           FROM team_member_communities tmc
           JOIN bitcoin_communities c ON tmc.community_id = c.id
           WHERE tmc.team_member_id = ?
-        `).bind(parseInt(member.id, 10)).all();
+        `
+        )
+          .bind(parseInt(member.id, 10))
+          .all();
         console.log("team_member_communities result:", JSON.stringify(result.results));
         return new Response(JSON.stringify(result.results), {
           headers: { "Content-Type": "application/json" }
@@ -417,7 +447,9 @@ var index_default = {
           query += " WHERE country = ?";
           params.push(country);
         }
-        const result = await env.DB.prepare(query).bind(...params).all();
+        const result = await env.DB.prepare(query)
+          .bind(...params)
+          .all();
         return new Response(JSON.stringify(result.results), {
           headers: { "Content-Type": "application/json" }
         });
@@ -429,7 +461,7 @@ var index_default = {
     if (request.method === "GET" && url.pathname === "/community_countries") {
       try {
         const result = await env.DB.prepare("SELECT DISTINCT country FROM bitcoin_communities").all();
-        const countries = result.results.map((r) => r.country);
+        const countries = result.results.map(r => r.country);
         return new Response(JSON.stringify(countries), {
           headers: { "Content-Type": "application/json" }
         });
@@ -474,7 +506,9 @@ var index_default = {
         ORDER BY is_priority_community DESC, o.name ASC
       `;
       try {
-        const result = await env.DB.prepare(query).bind(...params).all();
+        const result = await env.DB.prepare(query)
+          .bind(...params)
+          .all();
         return new Response(JSON.stringify(result.results), {
           headers: { "Content-Type": "application/json" }
         });
@@ -498,7 +532,9 @@ var index_default = {
         params.push(`%${name}%`);
       }
       try {
-        const result = await env.DB.prepare(query).bind(...params).all();
+        const result = await env.DB.prepare(query)
+          .bind(...params)
+          .all();
         return new Response(JSON.stringify(result.results), {
           headers: { "Content-Type": "application/json" }
         });
@@ -538,9 +574,9 @@ var index_default = {
         if (!(await isAdmin(env, data.updated_by))) {
           return new Response("Only admins can change admin rights", { status: 403 });
         }
-        const member = await env.DB.prepare(
-          `SELECT id, is_admin FROM team_members WHERE id = ?`
-        ).bind(parseInt(data.team_member_id, 10)).first();
+        const member = await env.DB.prepare(`SELECT id, is_admin FROM team_members WHERE id = ?`)
+          .bind(parseInt(data.team_member_id, 10))
+          .first();
         if (!member) {
           return new Response("Team member not found", { status: 404 });
         }
@@ -553,19 +589,23 @@ var index_default = {
           newValue === 1
             ? `UPDATE team_members SET is_admin = 1 WHERE id = ?`
             : `UPDATE team_members SET is_admin = 0 WHERE id = ? AND (SELECT COUNT(*) FROM team_members WHERE is_admin = 1) > 1`
-        ).bind(parseInt(member.id, 10)).run();
+        )
+          .bind(parseInt(member.id, 10))
+          .run();
         if (!res.meta || res.meta.changes !== 1) {
           return new Response("Cannot revoke the last admin", { status: 409 });
         }
         await env.DB.prepare(
           `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-        ).bind(
-          "update",
-          "team_members",
-          String(member.id),
-          parseInt(data.updated_by, 10),
-          JSON.stringify({ fields: { is_admin: { old: member.is_admin, new: newValue } } })
-        ).run();
+        )
+          .bind(
+            "update",
+            "team_members",
+            String(member.id),
+            parseInt(data.updated_by, 10),
+            JSON.stringify({ fields: { is_admin: { old: member.is_admin, new: newValue } } })
+          )
+          .run();
         return Response.json({ id: member.id, is_admin: newValue, changed: true });
       } catch (error) {
         console.error("Error changing admin rights:", error);
@@ -579,14 +619,14 @@ var index_default = {
       }
       try {
         // Delete existing associations
-        await env.DB.prepare(
-          `DELETE FROM organization_communities WHERE organization_id = ?`
-        ).bind(parseInt(data.organization_id, 10)).run();
+        await env.DB.prepare(`DELETE FROM organization_communities WHERE organization_id = ?`)
+          .bind(parseInt(data.organization_id, 10))
+          .run();
         // Insert new associations
         for (const community_id of data.community_ids) {
-          await env.DB.prepare(
-            `INSERT INTO organization_communities (organization_id, community_id) VALUES (?, ?)`
-          ).bind(parseInt(data.organization_id, 10), parseInt(community_id, 10)).run();
+          await env.DB.prepare(`INSERT INTO organization_communities (organization_id, community_id) VALUES (?, ?)`)
+            .bind(parseInt(data.organization_id, 10), parseInt(community_id, 10))
+            .run();
         }
         return new Response("Organization communities updated", { status: 200 });
       } catch (error) {
@@ -618,28 +658,32 @@ var index_default = {
           ? [String(data.telegram_id), data.name, data.time_zone]
           : [String(data.telegram_id), data.name];
         console.log("First user registration: insertQuery and params", { insertQuery, insertParams });
-        const res = await env.DB.prepare(insertQuery).bind(...insertParams).run();
+        const res = await env.DB.prepare(insertQuery)
+          .bind(...insertParams)
+          .run();
         console.log("First user registration: insert result", { res });
-        const newMember = await env.DB.prepare(
-          `SELECT id FROM team_members WHERE telegram_id = ?`
-        ).bind(String(data.telegram_id)).first();
+        const newMember = await env.DB.prepare(`SELECT id FROM team_members WHERE telegram_id = ?`)
+          .bind(String(data.telegram_id))
+          .first();
         console.log("First user registration: newMember select result", { newMember });
         await env.DB.prepare(
           `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
-        ).bind(
-          "insert",
-          "team_members",
-          String(newMember.id),
-          null,
-          JSON.stringify({
-            fields: {
-              telegram_id: { old: null, new: data.telegram_id },
-              name: { old: null, new: data.name },
-              ...(data.time_zone ? { time_zone: { old: null, new: data.time_zone } } : {}),
-              is_admin: { old: null, new: 1 }
-            }
-          })
-        ).run();
+        )
+          .bind(
+            "insert",
+            "team_members",
+            String(newMember.id),
+            null,
+            JSON.stringify({
+              fields: {
+                telegram_id: { old: null, new: data.telegram_id },
+                name: { old: null, new: data.name },
+                ...(data.time_zone ? { time_zone: { old: null, new: data.time_zone } } : {}),
+                is_admin: { old: null, new: 1 }
+              }
+            })
+          )
+          .run();
         console.log("First user registration: audit_log insert complete");
         return Response.json({ id: newMember.id, created: true });
       } catch (error) {
@@ -653,7 +697,3 @@ var index_default = {
     return new Response("Not found", { status: 404 });
   }
 };
-export {
-  index_default as default
-};
-//# sourceMappingURL=index.js.map

@@ -1,11 +1,24 @@
 import { isValidTelegramId, isValidName } from "../helpers/validation.js";
 import { setStep } from "../helpers/session.js";
 import { errorMessage, successMessage } from "../helpers/messaging.js";
-import { startCommunityPicker, renderCommunityPicker, handleCommunityPickerInput, pickedCommunities } from "../helpers/community.js";
+import {
+  startCommunityPicker,
+  renderCommunityPicker,
+  handleCommunityPickerInput,
+  pickedCommunities
+} from "../helpers/community.js";
 
 const INVITE_PICKER_TITLE = "Select Bitcoin communities for the new team member:";
 
-export async function handleTeamMemberFlow(sendMessage, env, chatId, text, session, persistSession = async () => {}, removeSession = async () => {}) {
+export async function handleTeamMemberFlow(
+  sendMessage,
+  env,
+  chatId,
+  text,
+  session,
+  persistSession = async () => {},
+  removeSession = async () => {}
+) {
   console.log("[TEAMMEMBER FLOW DEBUG] step:", session.step, "| text:", text, "| session:", JSON.stringify(session));
   switch (session.step) {
     case "teammember_menu": {
@@ -47,7 +60,11 @@ export async function handleTeamMemberFlow(sendMessage, env, chatId, text, sessi
         }
         const candidates = members.filter(m => (m.is_admin === 1) !== granting);
         if (candidates.length === 0) {
-          await sendMessage(env, chatId, errorMessage(granting ? "All team members are already admins." : "No admins found."));
+          await sendMessage(
+            env,
+            chatId,
+            errorMessage(granting ? "All team members are already admins." : "No admins found.")
+          );
           await removeSession();
           return;
         }
@@ -55,11 +72,18 @@ export async function handleTeamMemberFlow(sendMessage, env, chatId, text, sessi
         session.admin_candidates = Object.fromEntries(candidates.map(m => [String(m.id), m.name]));
         setStep(session, "awaiting_admin_member");
         await persistSession();
-        await sendMessage(env, chatId, granting ? "Who should get admin rights?" : "Whose admin rights should be revoked?", {
-          reply_markup: {
-            inline_keyboard: candidates.map(m => [{ text: `${m.name} (${m.telegram_id})`, callback_data: `member:${m.id}` }])
+        await sendMessage(
+          env,
+          chatId,
+          granting ? "Who should get admin rights?" : "Whose admin rights should be revoked?",
+          {
+            reply_markup: {
+              inline_keyboard: candidates.map(m => [
+                { text: `${m.name} (${m.telegram_id})`, callback_data: `member:${m.id}` }
+              ])
+            }
           }
-        });
+        );
       } else if (action === "edit_existing") {
         await sendMessage(env, chatId, errorMessage("Editing existing team members is not implemented yet."));
         await removeSession();
@@ -117,13 +141,21 @@ export async function handleTeamMemberFlow(sendMessage, env, chatId, text, sessi
         session.invite_communities = result === "skip" ? [] : pickedCommunities(session.invite_picker);
         setStep(session, "awaiting_invite_confirm");
         await persistSession();
-        await sendMessage(env, chatId, session.invite_communities.length > 0
-          ? `Communities selected: ${session.invite_communities.map(c => c.name).join(", ")}. Type 'confirm' to send the invitation or 'cancel' to abort.`
-          : "No communities selected. Type 'confirm' to send the invitation or 'cancel' to abort.");
+        await sendMessage(
+          env,
+          chatId,
+          session.invite_communities.length > 0
+            ? `Communities selected: ${session.invite_communities.map(c => c.name).join(", ")}. Type 'confirm' to send the invitation or 'cancel' to abort.`
+            : "No communities selected. Type 'confirm' to send the invitation or 'cancel' to abort."
+        );
       } else if (result.error) {
         await sendMessage(env, chatId, errorMessage(result.error));
       } else {
-        await sendMessage(env, chatId, errorMessage("Please use the buttons to select communities, then press Done or Skip."));
+        await sendMessage(
+          env,
+          chatId,
+          errorMessage("Please use the buttons to select communities, then press Done or Skip.")
+        );
       }
       break;
     }
@@ -138,18 +170,25 @@ export async function handleTeamMemberFlow(sendMessage, env, chatId, text, sessi
             community_ids: session.invite_communities ? session.invite_communities.map(c => c.id) : [],
             invited_by: session.created_by
           };
-          const res = await env.crmApi.fetch(new Request(
-            `${env.CRM_API_URL}/team_member`,
-            {
+          const res = await env.crmApi.fetch(
+            new Request(`${env.CRM_API_URL}/team_member`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(payload)
-            }
-          ));
+            })
+          );
           if (res.ok) {
-            await sendMessage(env, chatId, successMessage(`Invitation sent to "${session.invite_name}" (Telegram ID: ${session.invite_id}).`));
+            await sendMessage(
+              env,
+              chatId,
+              successMessage(`Invitation sent to "${session.invite_name}" (Telegram ID: ${session.invite_id}).`)
+            );
           } else {
-            await sendMessage(env, chatId, errorMessage("Failed to send invitation. Please try again or contact support."));
+            await sendMessage(
+              env,
+              chatId,
+              errorMessage("Failed to send invitation. Please try again or contact support.")
+            );
           }
         } catch (e) {
           await sendMessage(env, chatId, errorMessage("Error sending invitation."));
@@ -159,7 +198,11 @@ export async function handleTeamMemberFlow(sendMessage, env, chatId, text, sessi
         await sendMessage(env, chatId, errorMessage("Invitation cancelled."));
         await removeSession();
       } else {
-        await sendMessage(env, chatId, errorMessage("Please type 'confirm' to send the invitation or 'cancel' to abort."));
+        await sendMessage(
+          env,
+          chatId,
+          errorMessage("Please type 'confirm' to send the invitation or 'cancel' to abort.")
+        );
       }
       break;
     }
@@ -173,16 +216,19 @@ export async function handleTeamMemberFlow(sendMessage, env, chatId, text, sessi
       }
       const granting = session.admin_action === "grant";
       try {
-        const res = await env.crmApi.fetch(new Request(
-          `${env.CRM_API_URL}/team_member/admin`,
-          {
+        const res = await env.crmApi.fetch(
+          new Request(`${env.CRM_API_URL}/team_member/admin`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ team_member_id: memberId, is_admin: granting, updated_by: session.created_by })
-          }
-        ));
+          })
+        );
         if (res.ok) {
-          await sendMessage(env, chatId, successMessage(granting ? `${memberName} is now an admin.` : `${memberName} is no longer an admin.`));
+          await sendMessage(
+            env,
+            chatId,
+            successMessage(granting ? `${memberName} is now an admin.` : `${memberName} is no longer an admin.`)
+          );
         } else if (res.status === 409) {
           await sendMessage(env, chatId, errorMessage("Cannot revoke the last admin."));
         } else if (res.status === 403) {
