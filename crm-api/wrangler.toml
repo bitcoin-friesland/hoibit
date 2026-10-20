@@ -1,6 +1,6 @@
 name = "crm-api"
 account_id = "e6bb99fcf594d0451bd02dcf63a73b26"
-compatibility_date = "2025-04-11"
+compatibility_date = "2026-10-01"
 main = "index.js"
 
 # Only reachable via the crmApi service binding from telegram-crm.
