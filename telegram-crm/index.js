@@ -96,6 +96,15 @@ var index_default = {
     // Handle button/inline callbacks
     if (update.callback_query) {
       const data = update.callback_query.data;
+      // Sessions are per chat; in a group only the user who started the flow may press its buttons.
+      if (session && session.telegram_id && String(session.telegram_id) !== userId) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/answerCallbackQuery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ callback_query_id: update.callback_query.id })
+        });
+        return new Response("OK");
+      }
       if (session) {
         session.last_callback_data = data;
         await persistSession();
@@ -109,9 +118,6 @@ var index_default = {
           break;
         case "conversation":
           await handleConversationFlow(sendMessage, env, chatId, undefined, session, persistSession, removeSession);
-          break;
-        case "invite":
-          await handleInviteFlow(sendMessage, env, chatId, undefined, session, persistSession, removeSession);
           break;
         case "first_user":
           await handleFirstUserFlow(sendMessage, env, chatId, undefined, session, persistSession, removeSession);
@@ -143,13 +149,13 @@ var index_default = {
 
     let createdBy = null;
     let userValidated = false;
+    let isAdmin = false;
     try {
       const validationRes = await env.crmApi.fetch(new Request(
         `${env.CRM_API_URL}/validate-user`,
         {
           method: "POST",
           headers: {
-            "Authorization": `Bearer ${env.API_TOKEN}`,
             "Content-Type": "application/json"
           },
           body: JSON.stringify({ telegram_id: userId })
@@ -157,7 +163,9 @@ var index_default = {
       ));
       if (validationRes.ok) {
         userValidated = true;
-        createdBy = (await validationRes.json()).id;
+        const member = await validationRes.json();
+        createdBy = member.id;
+        isAdmin = member.is_admin === 1;
       } else {
         try {
           const countRes = await env.crmApi.fetch(new Request(`${env.CRM_API_URL}/team_members/count`));
@@ -213,11 +221,13 @@ var index_default = {
     }
 
     if (text === "/help") {
+      const adminCommands = isAdmin
+        ? `\n/teammember - Manage team members (invite, admin rights)\n/invite - Invite a new team member`
+        : "";
       await sendMessage(env, chatId, `Available commands:
 /newcontact - Add new contact
 /neworg - Add new organization
-/logconversation - Log a conversation
-/teammember - Manage team members (invite, edit)
+/logconversation - Log a conversation${adminCommands}
 /cancel - Cancel current input`);
       return new Response("OK");
     }
@@ -244,10 +254,15 @@ var index_default = {
       await handleConversationFlow(sendMessage, env, chatId, text, session, persistSession, removeSession);
       return new Response("OK");
     }
+    if ((text === "/invite" || text === "/teammember") && !isAdmin) {
+      await sendMessage(env, chatId, "Only admins can manage team members.");
+      return new Response("OK");
+    }
     if (text === "/invite") {
-      session = { step: "awaiting_invite_id", created_by: createdBy, telegram_id: userId, mode: "invite" };
+      // Shortcut into the invite steps of the team member flow
+      session = { step: "awaiting_invite_id", created_by: createdBy, telegram_id: userId, mode: "teammember" };
       await setSession(env, chatId, session);
-      await handleInviteFlow(sendMessage, env, chatId, text, session, persistSession, removeSession);
+      await sendMessage(env, chatId, "What is the Telegram user ID of the team member you want to invite?");
       return new Response("OK");
     }
     if (text === "/teammember") {
@@ -270,13 +285,15 @@ var index_default = {
       case "conversation":
         await handleConversationFlow(sendMessage, env, chatId, text, session, persistSession, removeSession);
         break;
-      case "invite":
-        await handleInviteFlow(sendMessage, env, chatId, text, session, persistSession, removeSession);
-        break;
       case "first_user":
         await handleFirstUserFlow(sendMessage, env, chatId, text, session, persistSession, removeSession);
         break;
       case "teammember":
+        if (!isAdmin) {
+          await sendMessage(env, chatId, "Only admins can manage team members.");
+          await removeSession();
+          break;
+        }
         await handleTeamMemberFlow(sendMessage, env, chatId, text, session, persistSession, removeSession);
         break;
       default:
