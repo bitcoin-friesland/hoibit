@@ -3,6 +3,11 @@ account_id = "e6bb99fcf594d0451bd02dcf63a73b26"
 compatibility_date = "2025-04-11"
 main = "index.js"
 
+# Only reachable via the crmApi service binding from telegram-crm.
+# crm-api has no authentication, so it must never get a public URL.
+workers_dev = false
+preview_urls = false
+
 [[d1_databases]]
 binding = "DB"
 database_name = "crm"

@@ -2,6 +2,11 @@ name = "telegram-crm"
 compatibility_date = "2024-04-15"
 main = "index.js"
 
+# No routes or custom domains exist, so the Telegram webhook can only
+# reach this Worker via telegram-crm.bitcoinfriesland.workers.dev.
+workers_dev = true
+preview_urls = true
+
 [vars]
 CRM_API_URL = "https://crm-api"
 
