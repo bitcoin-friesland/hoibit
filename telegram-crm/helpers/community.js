@@ -18,7 +18,7 @@ async function fetchUserCommunities(env, userId) {
   // Fetch user's current communities from crm-api
   const url = `${env.CRM_API_URL}/team_member_communities?telegram_id=${userId}`;
   const res = await env.crmApi.fetch(new Request(url));
-  if (!res.ok) throw new Error('Failed to fetch user communities');
+  if (!res.ok) throw new Error("Failed to fetch user communities");
   return await res.json();
 }
 
@@ -26,7 +26,7 @@ export async function fetchCountries(env) {
   // Fetch unique countries from bitcoin_communities table
   const url = `${env.CRM_API_URL}/community_countries`;
   const res = await env.crmApi.fetch(new Request(url));
-  if (!res.ok) throw new Error('Failed to fetch countries');
+  if (!res.ok) throw new Error("Failed to fetch countries");
   return await res.json();
 }
 
@@ -34,7 +34,7 @@ export async function fetchCommunitiesByCountry(env, country) {
   // Fetch all communities in a country
   const url = `${env.CRM_API_URL}/bitcoin_communities?country=${encodeURIComponent(country)}`;
   const res = await env.crmApi.fetch(new Request(url));
-  if (!res.ok) throw new Error('Failed to fetch communities');
+  if (!res.ok) throw new Error("Failed to fetch communities");
   return await res.json();
 }
 
@@ -66,10 +66,12 @@ export async function startCommunityPicker(env, telegramId) {
 }
 
 function communityButton(state, id) {
-  return [{
-    text: `${state.selected.includes(id) ? '✅ ' : ''}${state.known[id].name}`,
-    callback_data: `community:${id}`
-  }];
+  return [
+    {
+      text: `${state.selected.includes(id) ? "✅ " : ""}${state.known[id].name}`,
+      callback_data: `community:${id}`
+    }
+  ];
 }
 
 /**
@@ -80,22 +82,22 @@ export function renderCommunityPicker(state, title) {
   if (state.countryIds) {
     const rows = state.countryIds.map(id => communityButton(state, id));
     rows.push(
-      [{ text: 'Back to countries', callback_data: 'choose_other' }],
-      [{ text: 'Done', callback_data: 'done' }]
+      [{ text: "Back to countries", callback_data: "choose_other" }],
+      [{ text: "Done", callback_data: "done" }]
     );
     return [`Select communities in ${state.country}:`, { reply_markup: { inline_keyboard: rows } }];
   }
   if (state.countries) {
     const rows = state.countries.map((country, i) => [{ text: country, callback_data: `country:${i}` }]);
-    rows.push([{ text: 'Back', callback_data: 'back' }]);
-    return ['Choose a country:', { reply_markup: { inline_keyboard: rows } }];
+    rows.push([{ text: "Back", callback_data: "back" }]);
+    return ["Choose a country:", { reply_markup: { inline_keyboard: rows } }];
   }
   const ids = [...state.own, ...state.selected.filter(id => !state.own.includes(id))];
   const rows = ids.map(id => communityButton(state, id));
   rows.push(
-    [{ text: 'Choose other communities', callback_data: 'choose_other' }],
-    [{ text: 'Done', callback_data: 'done' }],
-    [{ text: 'Skip', callback_data: 'skip' }]
+    [{ text: "Choose other communities", callback_data: "choose_other" }],
+    [{ text: "Done", callback_data: "done" }],
+    [{ text: "Skip", callback_data: "skip" }]
   );
   return [title, { reply_markup: { inline_keyboard: rows } }];
 }
@@ -105,47 +107,45 @@ export function renderCommunityPicker(state, title) {
  * Returns "updated" (render again), "done", "skip", "invalid", or { error } when a fetch failed.
  */
 export async function handleCommunityPickerInput(env, state, cb) {
-  if (cb && cb.startsWith('community:')) {
-    const id = Number(cb.slice('community:'.length));
-    if (!state.known[id]) return 'invalid';
-    state.selected = state.selected.includes(id)
-      ? state.selected.filter(x => x !== id)
-      : [...state.selected, id];
-    return 'updated';
+  if (cb && cb.startsWith("community:")) {
+    const id = Number(cb.slice("community:".length));
+    if (!state.known[id]) return "invalid";
+    state.selected = state.selected.includes(id) ? state.selected.filter(x => x !== id) : [...state.selected, id];
+    return "updated";
   }
-  if (cb === 'choose_other') {
+  if (cb === "choose_other") {
     try {
       state.countries = await fetchCountries(env);
     } catch (e) {
-      return { error: 'Could not load countries.' };
+      return { error: "Could not load countries." };
     }
     state.country = null;
     state.countryIds = null;
-    return 'updated';
+    return "updated";
   }
-  if (cb && cb.startsWith('country:')) {
-    const country = state.countries && state.countries[Number(cb.slice('country:'.length))];
-    if (!country) return 'invalid';
+  if (cb && cb.startsWith("country:")) {
+    const country = state.countries && state.countries[Number(cb.slice("country:".length))];
+    if (!country) return "invalid";
     let communities;
     try {
       communities = await fetchCommunitiesByCountry(env, country);
     } catch (e) {
-      return { error: 'Could not load communities.' };
+      return { error: "Could not load communities." };
     }
     for (const c of communities) state.known[c.id] = { name: c.name, region: c.region || null };
     state.country = country;
     state.countryIds = communities.map(c => c.id);
-    return 'updated';
+    return "updated";
   }
-  if (cb === 'back') {
+  if (cb === "back") {
     state.countries = null;
     state.country = null;
     state.countryIds = null;
-    return 'updated';
+    return "updated";
   }
-  if (cb === 'done') return 'done';
-  if (cb === 'skip') return 'skip';
-  return 'invalid';
+  if (cb === "done") return "done";
+  if (cb === "skip") return "skip";
+  return "invalid";
 }
 
 /**

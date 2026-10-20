@@ -55,7 +55,7 @@ function isFromTelegram(request, env) {
 }
 
 // Main fetch handler
-var index_default = {
+export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method !== "POST" || url.pathname !== "/") {
@@ -151,16 +151,15 @@ var index_default = {
     let userValidated = false;
     let isAdmin = false;
     try {
-      const validationRes = await env.crmApi.fetch(new Request(
-        `${env.CRM_API_URL}/validate-user`,
-        {
+      const validationRes = await env.crmApi.fetch(
+        new Request(`${env.CRM_API_URL}/validate-user`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
           },
           body: JSON.stringify({ telegram_id: userId })
-        }
-      ));
+        })
+      );
       if (validationRes.ok) {
         userValidated = true;
         const member = await validationRes.json();
@@ -179,35 +178,47 @@ var index_default = {
             return new Response("Error", { status: 500 });
           }
           const { count } = await countRes.json();
-      if (count === 0) {
-        if (!session || session.mode !== "first_user") {
-          session = { step: "awaiting_first_name", telegram_id: userId, mode: "first_user" };
-          await setSession(env, chatId, session);
-          await sendMessage(env, chatId, "Welcome! You are the first user. Please enter your name to register as the first team member:");
-          return new Response("OK");
-        }
-      } else {
-        // Only send unauthorized message in private chats or if message is a bot command in group chats
-        const chatType = update.message.chat.type;
-        const isPrivate = chatType === "private";
-        const isBotCommand = text && text.startsWith("/");
-        if (isPrivate || isBotCommand) {
-          const unauthorizedSentKey = `unauthorized_sent:${userId}`;
-          const unauthorizedSent = await env.SESSIONS.get(unauthorizedSentKey);
-          if (!unauthorizedSent) {
-            if (!session) {
-              session = {};
+          if (count === 0) {
+            if (!session || session.mode !== "first_user") {
+              session = { step: "awaiting_first_name", telegram_id: userId, mode: "first_user" };
+              await setSession(env, chatId, session);
+              await sendMessage(
+                env,
+                chatId,
+                "Welcome! You are the first user. Please enter your name to register as the first team member:"
+              );
+              return new Response("OK");
             }
-            session.unauthorizedMessageSent = true;
-            await setSession(env, chatId, session);
-            await env.SESSIONS.put(unauthorizedSentKey, "true", { expirationTtl: 86400 }); // 24 hours TTL
-            await sendMessage(env, chatId, `You are not authorized to use this bot. Contact a team member for access. Share the team member your Telegram user ID ${userId}`);
+          } else {
+            // Only send unauthorized message in private chats or if message is a bot command in group chats
+            const chatType = update.message.chat.type;
+            const isPrivate = chatType === "private";
+            const isBotCommand = text && text.startsWith("/");
+            if (isPrivate || isBotCommand) {
+              const unauthorizedSentKey = `unauthorized_sent:${userId}`;
+              const unauthorizedSent = await env.SESSIONS.get(unauthorizedSentKey);
+              if (!unauthorizedSent) {
+                if (!session) {
+                  session = {};
+                }
+                session.unauthorizedMessageSent = true;
+                await setSession(env, chatId, session);
+                await env.SESSIONS.put(unauthorizedSentKey, "true", { expirationTtl: 86400 }); // 24 hours TTL
+                await sendMessage(
+                  env,
+                  chatId,
+                  `You are not authorized to use this bot. Contact a team member for access. Share the team member your Telegram user ID ${userId}`
+                );
+              }
+            }
+            return new Response("Forbidden", { status: 403 });
           }
-        }
-        return new Response("Forbidden", { status: 403 });
-      }
         } catch (e2) {
-          await sendMessage(env, chatId, `[crmApi fetch EXCEPTION: team_members/count] ${e2 && e2.stack ? e2.stack : e2}`);
+          await sendMessage(
+            env,
+            chatId,
+            `[crmApi fetch EXCEPTION: team_members/count] ${e2 && e2.stack ? e2.stack : e2}`
+          );
           return new Response("Error", { status: 500 });
         }
       }
@@ -224,16 +235,24 @@ var index_default = {
       const adminCommands = isAdmin
         ? `\n/teammember - Manage team members (invite, admin rights)\n/invite - Invite a new team member`
         : "";
-      await sendMessage(env, chatId, `Available commands:
+      await sendMessage(
+        env,
+        chatId,
+        `Available commands:
 /newcontact - Add new contact
 /neworg - Add new organization
 /logconversation - Log a conversation${adminCommands}
-/cancel - Cancel current input`);
+/cancel - Cancel current input`
+      );
       return new Response("OK");
     }
     if (text === "/cancel") {
       await removeSession();
-      await sendMessage(env, chatId, "Active input has been cancelled. You can start again with /newcontact, /neworg, etc.");
+      await sendMessage(
+        env,
+        chatId,
+        "Active input has been cancelled. You can start again with /newcontact, /neworg, etc."
+      );
       return new Response("OK");
     }
     if (text === "/newcontact") {
@@ -303,8 +322,4 @@ var index_default = {
     }
     return new Response("OK");
   }
-};
-
-export {
-  index_default as default
 };

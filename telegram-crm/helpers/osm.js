@@ -68,7 +68,17 @@ async function searchNominatimByNameAndRegion(name, region) {
   return data.map(item => {
     // OSM keys to extract
     const osmKeys = [
-      "shop", "amenity", "office", "craft", "industrial", "tourism", "leisure", "healthcare", "religion", "farm", "landuse"
+      "shop",
+      "amenity",
+      "office",
+      "craft",
+      "industrial",
+      "tourism",
+      "leisure",
+      "healthcare",
+      "religion",
+      "farm",
+      "landuse"
     ];
     const extraFields = {};
     for (const key of osmKeys) {
@@ -122,14 +132,20 @@ export async function findOsmNodeForOrganization({ name, region, phone, website,
       }
     }
   }
-  if (website) queries.push(`node["website"~"${escapeForOverpass(website)}",i];way["website"~"${escapeForOverpass(website)}",i];relation["website"~"${escapeForOverpass(website)}",i];`);
-  if (email) queries.push(`node["email"~"${escapeForOverpass(email)}",i];way["email"~"${escapeForOverpass(email)}",i];relation["email"~"${escapeForOverpass(email)}",i];`);
+  if (website)
+    queries.push(
+      `node["website"~"${escapeForOverpass(website)}",i];way["website"~"${escapeForOverpass(website)}",i];relation["website"~"${escapeForOverpass(website)}",i];`
+    );
+  if (email)
+    queries.push(
+      `node["email"~"${escapeForOverpass(email)}",i];way["email"~"${escapeForOverpass(email)}",i];relation["email"~"${escapeForOverpass(email)}",i];`
+    );
 
   if (queries.length > 0) {
     const query = `
 [out:json][timeout:25];
 (
-  ${queries.join('\n')}
+  ${queries.join("\n")}
 );
 out body;
 `;
@@ -172,11 +188,12 @@ out body;
         overpassResults = Object.values(unique).map(item => {
           // Determine matchTypes (array)
           let matchTypes = [];
-          if (phone && (
-            (item.tags?.phone && matchesAnyPhoneVariant(item.tags.phone, phone)) ||
-            (item.tags?.["contact:phone"] && matchesAnyPhoneVariant(item.tags["contact:phone"], phone)) ||
-            (item.tags?.telephone && matchesAnyPhoneVariant(item.tags.telephone, phone))
-          )) {
+          if (
+            phone &&
+            ((item.tags?.phone && matchesAnyPhoneVariant(item.tags.phone, phone)) ||
+              (item.tags?.["contact:phone"] && matchesAnyPhoneVariant(item.tags["contact:phone"], phone)) ||
+              (item.tags?.telephone && matchesAnyPhoneVariant(item.tags.telephone, phone)))
+          ) {
             matchTypes.push("phone");
           }
           if (email && item.tags?.email && item.tags.email.toLowerCase() === email.toLowerCase()) {
@@ -188,12 +205,24 @@ out body;
           if (matchTypes.length === 0) matchTypes.push("other");
           console.debug("[OSM DEBUG] Overpass matchType input:", {
             tags: item.tags,
-            phone, email, website
+            phone,
+            email,
+            website
           });
           console.debug("[OSM DEBUG] Overpass matchTypes result:", matchTypes);
           // OSM keys to extract
           const osmKeys = [
-            "shop", "amenity", "office", "craft", "industrial", "tourism", "leisure", "healthcare", "religion", "farm", "landuse"
+            "shop",
+            "amenity",
+            "office",
+            "craft",
+            "industrial",
+            "tourism",
+            "leisure",
+            "healthcare",
+            "religion",
+            "farm",
+            "landuse"
           ];
           const extraFields = {};
           for (const key of osmKeys) {
@@ -209,12 +238,12 @@ out body;
             type: item.type || "",
             name: item.tags?.name || "",
             address: {
-              street: item.tags?.['addr:street'] || "",
-              housenumber: item.tags?.['addr:housenumber'] || "",
-              postcode: item.tags?.['addr:postcode'] || "",
-              city: item.tags?.['addr:city'] || "",
-              region: item.tags?.['addr:region'] || item.tags?.['addr:province'] || "",
-              country: item.tags?.['addr:country'] || ""
+              street: item.tags?.["addr:street"] || "",
+              housenumber: item.tags?.["addr:housenumber"] || "",
+              postcode: item.tags?.["addr:postcode"] || "",
+              city: item.tags?.["addr:city"] || "",
+              region: item.tags?.["addr:region"] || item.tags?.["addr:province"] || "",
+              country: item.tags?.["addr:country"] || ""
             },
             phone: item.tags?.phone || "",
             website: item.tags?.website || "",
@@ -325,19 +354,225 @@ function generatePhoneVariants(phone) {
   // Full ITU E.164 country calling codes (sorted by length descending for correct matching)
   // Source: https://www.itu.int/itudoc/itu-t/ob-lists/icc/e164_763.html and other public sources
   const countryCodes = [
-    "1", "7", "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45", "46", "47", "48", "49",
-    "51", "52", "53", "54", "55", "56", "57", "58", "60", "61", "62", "63", "64", "65", "66", "81", "82", "84", "86", "90",
-    "91", "92", "93", "94", "95", "98", "211", "212", "213", "216", "218", "220", "221", "222", "223", "224", "225", "226",
-    "227", "228", "229", "230", "231", "232", "233", "234", "235", "236", "237", "238", "239", "240", "241", "242", "243",
-    "244", "245", "246", "247", "248", "249", "250", "251", "252", "253", "254", "255", "256", "257", "258", "260", "261",
-    "262", "263", "264", "265", "266", "267", "268", "269", "290", "291", "297", "298", "299", "350", "351", "352", "353",
-    "354", "355", "356", "357", "358", "359", "370", "371", "372", "373", "374", "375", "376", "377", "378", "379", "380",
-    "381", "382", "383", "385", "386", "387", "389", "420", "421", "423", "500", "501", "502", "503", "504", "505", "506",
-    "507", "508", "509", "590", "591", "592", "593", "594", "595", "596", "597", "598", "599", "670", "672", "673", "674",
-    "675", "676", "677", "678", "679", "680", "681", "682", "683", "685", "686", "687", "688", "689", "690", "691", "692",
-    "850", "852", "853", "855", "856", "870", "871", "872", "873", "874", "878", "880", "881", "882", "883", "886", "888",
-    "960", "961", "962", "963", "964", "965", "966", "967", "968", "970", "971", "972", "973", "974", "975", "976", "977",
-    "992", "993", "994", "995", "996", "997", "998", "999"
+    "1",
+    "7",
+    "20",
+    "27",
+    "30",
+    "31",
+    "32",
+    "33",
+    "34",
+    "36",
+    "39",
+    "40",
+    "41",
+    "43",
+    "44",
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "51",
+    "52",
+    "53",
+    "54",
+    "55",
+    "56",
+    "57",
+    "58",
+    "60",
+    "61",
+    "62",
+    "63",
+    "64",
+    "65",
+    "66",
+    "81",
+    "82",
+    "84",
+    "86",
+    "90",
+    "91",
+    "92",
+    "93",
+    "94",
+    "95",
+    "98",
+    "211",
+    "212",
+    "213",
+    "216",
+    "218",
+    "220",
+    "221",
+    "222",
+    "223",
+    "224",
+    "225",
+    "226",
+    "227",
+    "228",
+    "229",
+    "230",
+    "231",
+    "232",
+    "233",
+    "234",
+    "235",
+    "236",
+    "237",
+    "238",
+    "239",
+    "240",
+    "241",
+    "242",
+    "243",
+    "244",
+    "245",
+    "246",
+    "247",
+    "248",
+    "249",
+    "250",
+    "251",
+    "252",
+    "253",
+    "254",
+    "255",
+    "256",
+    "257",
+    "258",
+    "260",
+    "261",
+    "262",
+    "263",
+    "264",
+    "265",
+    "266",
+    "267",
+    "268",
+    "269",
+    "290",
+    "291",
+    "297",
+    "298",
+    "299",
+    "350",
+    "351",
+    "352",
+    "353",
+    "354",
+    "355",
+    "356",
+    "357",
+    "358",
+    "359",
+    "370",
+    "371",
+    "372",
+    "373",
+    "374",
+    "375",
+    "376",
+    "377",
+    "378",
+    "379",
+    "380",
+    "381",
+    "382",
+    "383",
+    "385",
+    "386",
+    "387",
+    "389",
+    "420",
+    "421",
+    "423",
+    "500",
+    "501",
+    "502",
+    "503",
+    "504",
+    "505",
+    "506",
+    "507",
+    "508",
+    "509",
+    "590",
+    "591",
+    "592",
+    "593",
+    "594",
+    "595",
+    "596",
+    "597",
+    "598",
+    "599",
+    "670",
+    "672",
+    "673",
+    "674",
+    "675",
+    "676",
+    "677",
+    "678",
+    "679",
+    "680",
+    "681",
+    "682",
+    "683",
+    "685",
+    "686",
+    "687",
+    "688",
+    "689",
+    "690",
+    "691",
+    "692",
+    "850",
+    "852",
+    "853",
+    "855",
+    "856",
+    "870",
+    "871",
+    "872",
+    "873",
+    "874",
+    "878",
+    "880",
+    "881",
+    "882",
+    "883",
+    "886",
+    "888",
+    "960",
+    "961",
+    "962",
+    "963",
+    "964",
+    "965",
+    "966",
+    "967",
+    "968",
+    "970",
+    "971",
+    "972",
+    "973",
+    "974",
+    "975",
+    "976",
+    "977",
+    "992",
+    "993",
+    "994",
+    "995",
+    "996",
+    "997",
+    "998",
+    "999"
   ].sort((a, b) => b.length - a.length);
 
   let countryCode = null;

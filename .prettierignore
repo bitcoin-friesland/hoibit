@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+.deployed/
+.clinerules/
+dist/
+package-lock.json
+mail-to-tg/
+schema.sql
