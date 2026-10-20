@@ -19,3 +19,8 @@ export function promptWithOptions(text, options) {
     reply_markup: { inline_keyboard: options.map(opt => [{ text: opt.label, callback_data: opt.value }]) }
   };
 }
+
+// For messages sent with parse_mode "HTML": only <, > and & in text need escaping.
+export function escapeHtml(text) {
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
