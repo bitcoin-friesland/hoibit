@@ -1,15 +1,50 @@
 import { isValidTelegramId, isValidName } from "../helpers/validation.js";
 import { setStep } from "../helpers/session.js";
 import { errorMessage, successMessage } from "../helpers/messaging.js";
-import { selectCommunitiesList } from "../helpers/community.js";
+import { selectCommunitiesList, fetchCountries, fetchCommunitiesByCountry } from "../helpers/community.js";
+
+// Community selection for the invite flow. Three views, all in step awaiting_invite_community:
+// own (inviter's communities + anything selected elsewhere), country list, one country's communities.
+// session.invite_known maps community id -> name for every community shown so far.
+function communityButton(session, id) {
+  return [{
+    text: `${session.invite_selected.includes(id) ? "✅ " : ""}${session.invite_known[id]}`,
+    callback_data: `community:${id}`
+  }];
+}
 
 function inviteCommunityKeyboard(session) {
-  const rows = session.invite_options.map(c => [{
-    text: `${session.invite_selected.includes(c.id) ? "✅ " : ""}${c.name}`,
-    callback_data: `community:${c.id}`
-  }]);
-  rows.push([{ text: "Done", callback_data: "done" }], [{ text: "Skip", callback_data: "skip" }]);
+  const ids = [...session.invite_own, ...session.invite_selected.filter(id => !session.invite_own.includes(id))];
+  const rows = ids.map(id => communityButton(session, id));
+  rows.push(
+    [{ text: "Choose other communities", callback_data: "choose_other" }],
+    [{ text: "Done", callback_data: "done" }],
+    [{ text: "Skip", callback_data: "skip" }]
+  );
   return { inline_keyboard: rows };
+}
+
+function countryKeyboard(session) {
+  const rows = session.invite_countries.map((country, i) => [{ text: country, callback_data: `country:${i}` }]);
+  rows.push([{ text: "Back", callback_data: "back" }]);
+  return { inline_keyboard: rows };
+}
+
+function countryCommunitiesKeyboard(session) {
+  const rows = session.invite_country_ids.map(id => communityButton(session, id));
+  rows.push(
+    [{ text: "Back to countries", callback_data: "choose_other" }],
+    [{ text: "Done", callback_data: "done" }]
+  );
+  return { inline_keyboard: rows };
+}
+
+async function showInviteCommunities(sendMessage, env, chatId, session) {
+  if (session.invite_country_ids) {
+    await sendMessage(env, chatId, `Select communities in ${session.invite_country}:`, { reply_markup: countryCommunitiesKeyboard(session) });
+  } else {
+    await sendMessage(env, chatId, "Select Bitcoin communities for the new team member:", { reply_markup: inviteCommunityKeyboard(session) });
+  }
 }
 
 export async function handleTeamMemberFlow(sendMessage, env, chatId, text, session, persistSession = async () => {}, removeSession = async () => {}) {
@@ -108,38 +143,72 @@ export async function handleTeamMemberFlow(sendMessage, env, chatId, text, sessi
       session.invite_timezone = timezone;
       // Offer the inviter's own communities; button presses arrive as separate updates
       // and are handled in awaiting_invite_community.
-      let options = [];
+      let own = [];
       try {
-        options = (await selectCommunitiesList(env, session.telegram_id)).map(c => ({ id: c.id, name: c.name }));
+        own = await selectCommunitiesList(env, session.telegram_id);
       } catch (e) {
-        options = [];
+        own = [];
       }
-      if (options.length === 0) {
-        session.invite_communities = [];
-        setStep(session, "awaiting_invite_confirm");
-        await persistSession();
-        await sendMessage(env, chatId, "No communities selected. Type 'confirm' to send the invitation or 'cancel' to abort.");
-        break;
-      }
-      session.invite_options = options;
+      session.invite_known = Object.fromEntries(own.map(c => [c.id, c.name]));
+      session.invite_own = own.map(c => c.id);
       session.invite_selected = [];
+      session.invite_country_ids = null;
       setStep(session, "awaiting_invite_community");
       await persistSession();
-      await sendMessage(env, chatId, "Select Bitcoin communities for the new team member:", { reply_markup: inviteCommunityKeyboard(session) });
+      await showInviteCommunities(sendMessage, env, chatId, session);
       break;
     }
     case "awaiting_invite_community": {
       const cb = session.last_callback_data;
+      session.last_callback_data = null;
+      await persistSession();
       if (cb && cb.startsWith("community:")) {
         const id = Number(cb.slice("community:".length));
+        if (!session.invite_known[id]) {
+          await sendMessage(env, chatId, errorMessage("Please use the buttons to select communities, then press Done or Skip."));
+          return;
+        }
         session.invite_selected = session.invite_selected.includes(id)
           ? session.invite_selected.filter(x => x !== id)
           : [...session.invite_selected, id];
-        session.last_callback_data = null;
         await persistSession();
-        await sendMessage(env, chatId, "Select Bitcoin communities for the new team member:", { reply_markup: inviteCommunityKeyboard(session) });
+        await showInviteCommunities(sendMessage, env, chatId, session);
+      } else if (cb === "choose_other") {
+        try {
+          session.invite_countries = await fetchCountries(env);
+        } catch (e) {
+          await sendMessage(env, chatId, errorMessage("Could not load countries."));
+          return;
+        }
+        session.invite_country_ids = null;
+        await persistSession();
+        await sendMessage(env, chatId, "Choose a country:", { reply_markup: countryKeyboard(session) });
+      } else if (cb && cb.startsWith("country:")) {
+        const country = session.invite_countries && session.invite_countries[Number(cb.slice("country:".length))];
+        if (!country) {
+          await sendMessage(env, chatId, errorMessage("Please choose a country from the buttons."));
+          return;
+        }
+        let communities;
+        try {
+          communities = await fetchCommunitiesByCountry(env, country);
+        } catch (e) {
+          await sendMessage(env, chatId, errorMessage("Could not load communities."));
+          return;
+        }
+        for (const c of communities) session.invite_known[c.id] = c.name;
+        session.invite_country = country;
+        session.invite_country_ids = communities.map(c => c.id);
+        await persistSession();
+        await showInviteCommunities(sendMessage, env, chatId, session);
+      } else if (cb === "back") {
+        session.invite_country_ids = null;
+        await persistSession();
+        await showInviteCommunities(sendMessage, env, chatId, session);
       } else if (cb === "done" || cb === "skip") {
-        session.invite_communities = cb === "skip" ? [] : session.invite_options.filter(c => session.invite_selected.includes(c.id));
+        session.invite_communities = cb === "skip"
+          ? []
+          : session.invite_selected.map(id => ({ id, name: session.invite_known[id] }));
         setStep(session, "awaiting_invite_confirm");
         await persistSession();
         await sendMessage(env, chatId, session.invite_communities.length > 0
