@@ -13,46 +13,28 @@
  *
  * Buttons: community:<id> (toggle), choose_other (country list), country:<index>, back, done, skip.
  */
+import type { PickedCommunity, SendOptions } from "../types";
 
-async function fetchUserCommunities(env, userId) {
-  // Fetch user's current communities from crm-api
-  const url = `${env.CRM_API_URL}/team_member_communities?telegram_id=${userId}`;
-  const res = await env.crmApi.fetch(new Request(url));
-  if (!res.ok) throw new Error("Failed to fetch user communities");
-  return await res.json();
+export interface CommunityPicker {
+  // ids of the team member's own communities, always shown first
+  own: number[];
+  known: Record<number, { name: string; region: string | null }>;
+  selected: number[];
+  countries: string[] | null;
+  country: string | null;
+  countryIds: number[] | null;
 }
 
-export async function fetchCountries(env) {
-  // Fetch unique countries from bitcoin_communities table
-  const url = `${env.CRM_API_URL}/community_countries`;
-  const res = await env.crmApi.fetch(new Request(url));
-  if (!res.ok) throw new Error("Failed to fetch countries");
-  return await res.json();
-}
-
-export async function fetchCommunitiesByCountry(env, country) {
-  // Fetch all communities in a country
-  const url = `${env.CRM_API_URL}/bitcoin_communities?country=${encodeURIComponent(country)}`;
-  const res = await env.crmApi.fetch(new Request(url));
-  if (!res.ok) throw new Error("Failed to fetch communities");
-  return await res.json();
-}
-
-/**
- * Returns the communities of a team member (by Telegram user id).
- */
-export async function selectCommunitiesList(env, userId) {
-  return await fetchUserCommunities(env, userId);
-}
+export type PickerResult = "updated" | "done" | "skip" | "invalid" | { error: string };
 
 /**
  * Creates picker state, preloaded with the team member's own communities.
  */
-export async function startCommunityPicker(env, telegramId) {
-  let own = [];
+export async function startCommunityPicker(env: Env, telegramId: string | undefined): Promise<CommunityPicker> {
+  let own: { id: number; name: string; region: string | null }[] = [];
   try {
-    own = await fetchUserCommunities(env, telegramId);
-  } catch (e) {
+    if (telegramId) own = await env.crmApi.teamMemberCommunities(telegramId);
+  } catch {
     own = [];
   }
   return {
@@ -65,7 +47,7 @@ export async function startCommunityPicker(env, telegramId) {
   };
 }
 
-function communityButton(state, id) {
+function communityButton(state: CommunityPicker, id: number) {
   return [
     {
       text: `${state.selected.includes(id) ? "✅ " : ""}${state.known[id].name}`,
@@ -78,7 +60,7 @@ function communityButton(state, id) {
  * Returns [text, { reply_markup }] for the current view, ready for sendMessage(env, chatId, ...).
  * title is shown on the main view (own communities + selections from other countries).
  */
-export function renderCommunityPicker(state, title) {
+export function renderCommunityPicker(state: CommunityPicker, title: string): [string, SendOptions] {
   if (state.countryIds) {
     const rows = state.countryIds.map(id => communityButton(state, id));
     rows.push(
@@ -104,9 +86,13 @@ export function renderCommunityPicker(state, title) {
 
 /**
  * Applies one button press to the picker state.
- * Returns "updated" (render again), "done", "skip", "invalid", or { error } when a fetch failed.
+ * Returns "updated" (render again), "done", "skip", "invalid", or { error } when a lookup failed.
  */
-export async function handleCommunityPickerInput(env, state, cb) {
+export async function handleCommunityPickerInput(
+  env: Env,
+  state: CommunityPicker,
+  cb: string | null | undefined
+): Promise<PickerResult> {
   if (cb && cb.startsWith("community:")) {
     const id = Number(cb.slice("community:".length));
     if (!state.known[id]) return "invalid";
@@ -115,8 +101,8 @@ export async function handleCommunityPickerInput(env, state, cb) {
   }
   if (cb === "choose_other") {
     try {
-      state.countries = await fetchCountries(env);
-    } catch (e) {
+      state.countries = await env.crmApi.communityCountries();
+    } catch {
       return { error: "Could not load countries." };
     }
     state.country = null;
@@ -128,8 +114,8 @@ export async function handleCommunityPickerInput(env, state, cb) {
     if (!country) return "invalid";
     let communities;
     try {
-      communities = await fetchCommunitiesByCountry(env, country);
-    } catch (e) {
+      communities = await env.crmApi.communities(country);
+    } catch {
       return { error: "Could not load communities." };
     }
     for (const c of communities) state.known[c.id] = { name: c.name, region: c.region || null };
@@ -151,6 +137,6 @@ export async function handleCommunityPickerInput(env, state, cb) {
 /**
  * Selected communities as [{ id, name, region }].
  */
-export function pickedCommunities(state) {
+export function pickedCommunities(state: CommunityPicker): PickedCommunity[] {
   return state.selected.map(id => ({ id, ...state.known[id] }));
 }

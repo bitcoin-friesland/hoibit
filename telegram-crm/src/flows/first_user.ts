@@ -1,8 +1,8 @@
-import { isValidName } from "../helpers/validation.js";
-import { setStep } from "../helpers/session.js";
-import { errorMessage, successMessage } from "../helpers/messaging.js";
+import { isValidName } from "../helpers/validation";
+import { errorMessage, successMessage } from "../helpers/messaging";
+import type { FlowHandler } from "../types";
 
-export async function handleFirstUserFlow(
+export const handleFirstUserFlow: FlowHandler = async (
   sendMessage,
   env,
   chatId,
@@ -10,8 +10,7 @@ export async function handleFirstUserFlow(
   session,
   persistSession = async () => {},
   removeSession = async () => {}
-) {
-  console.log("[FIRST USER FLOW DEBUG] step:", session.step, "| text:", text, "| session:", JSON.stringify(session));
+) => {
   switch (session.step) {
     case "awaiting_first_name": {
       const name = text && text.trim();
@@ -26,7 +25,7 @@ export async function handleFirstUserFlow(
       // Save name and move to time zone step
       session.name = name;
       session.step = "awaiting_time_zone";
-      await persistSession(session);
+      await persistSession();
       await sendMessage(env, chatId, "Please enter your time zone (e.g., Europe/Amsterdam or UTC+2).");
       break;
     }
@@ -41,22 +40,13 @@ export async function handleFirstUserFlow(
         );
         return;
       }
-      // Save time zone
       session.time_zone = timeZone;
-      // Prepare payload
-      const payload = {
-        telegram_id: String(chatId),
-        name: session.name,
-        time_zone: session.time_zone
-      };
       try {
-        const res = await env.crmApi.fetch(
-          new Request(`${env.CRM_API_URL}/first-user`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-          })
-        );
+        const res = await env.crmApi.firstUser({
+          telegram_id: String(chatId),
+          name: session.name ?? "",
+          time_zone: session.time_zone
+        });
         if (res.ok) {
           await sendMessage(
             env,
@@ -70,7 +60,7 @@ export async function handleFirstUserFlow(
             errorMessage("Failed to register first team member. Please try again or contact support.")
           );
         }
-      } catch (e) {
+      } catch {
         await sendMessage(env, chatId, errorMessage("Error registering first team member."));
       }
       await removeSession();
@@ -81,4 +71,4 @@ export async function handleFirstUserFlow(
       await removeSession();
       break;
   }
-}
+};
