@@ -34,4 +34,5 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ matrix.worker }}/package-lock.json
       - run: npm ci
+      - run: npm run typecheck --if-present
       - run: npm test

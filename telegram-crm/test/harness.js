@@ -1,17 +1,18 @@
-import { env } from "cloudflare:test";
+import { createExecutionContext, env } from "cloudflare:test";
 import { vi } from "vitest";
-import crmApi from "../../crm-api/index.js";
+import CrmApi from "../../crm-api/src/index.ts";
 import worker from "../index.js";
 
 export const SECRET = "test-webhook-secret";
 
 // env.DB is a test-only D1 for crm-api; telegram-crm itself only gets SESSIONS and crmApi.
+const crmApi = new CrmApi(createExecutionContext(), { DB: env.DB });
 const workerEnv = {
   SESSIONS: env.SESSIONS,
   TELEGRAM_TOKEN: "test-token",
   TELEGRAM_WEBHOOK_SECRET: SECRET,
   CRM_API_URL: "https://crm-api",
-  crmApi: { fetch: request => crmApi.fetch(request, { DB: env.DB }) }
+  crmApi: { fetch: request => crmApi.fetch(request) }
 };
 
 const DATA_TABLES = [

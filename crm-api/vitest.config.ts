@@ -11,6 +11,6 @@ export default defineConfig(async () => {
         miniflare: { bindings: { TEST_MIGRATIONS: migrations } }
       })
     ],
-    test: { setupFiles: ["./test/apply-migrations.js"] }
+    test: { setupFiles: ["./test/apply-migrations.ts"] }
   };
 });
