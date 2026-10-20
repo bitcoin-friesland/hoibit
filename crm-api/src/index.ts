@@ -25,6 +25,12 @@ import type {
 
 export type * from "./types";
 
+// Declared here rather than taken from the generated global Env, so that callers that
+// import this class for its RPC types (telegram-crm) type-check it against the right bindings.
+export interface CrmEnv {
+  DB: D1Database;
+}
+
 // Bind types must match the D1 column types (see .crm-rules.md): INTEGER columns get a number,
 // TEXT columns that hold ids (team_members.telegram_id, audit_log.record_id) get a string.
 const toInt = (value: RowId) => parseInt(String(value), 10);
@@ -48,7 +54,7 @@ const created = (value: unknown): Change => ({ old: null, new: value });
  * crm-api has no public URL and no authentication of its own; admin-only methods check
  * team_members.is_admin of the acting team member.
  */
-export default class CrmApi extends WorkerEntrypoint<Env> {
+export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
   // Transitional HTTP API for the telegram-crm version that still calls crm-api with fetch().
   async fetch(request: Request): Promise<Response> {
     return handleHttp(request, this);
