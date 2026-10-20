@@ -1,0 +1,208 @@
+import { env } from "cloudflare:test";
+import { beforeEach, describe, expect, it } from "vitest";
+import { escapeForOverpass } from "../src/helpers/osm";
+import { addAdmin, chatAs, resetAndStubFetch, type SentMessage } from "./harness";
+
+const ADMIN = 5001;
+let sent: SentMessage[];
+
+beforeEach(async () => {
+  sent = await resetAndStubFetch();
+});
+
+const lastText = () => sent[sent.length - 1].text;
+
+describe("webhook", () => {
+  it("rejects updates without the webhook secret", async () => {
+    const res = await chatAs(ADMIN).text("/help", { secret: null });
+    expect(res.status).toBe(401);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("tells an unknown user they are not authorized", async () => {
+    await addAdmin(ADMIN);
+    const res = await chatAs(6001).text("/help");
+    expect(res.status).toBe(403);
+    expect(lastText()).toContain("not authorized");
+  });
+});
+
+describe("/newcontact", () => {
+  it("saves a consumer with email and phone", async () => {
+    const adminId = await addAdmin(ADMIN);
+    const chat = chatAs(ADMIN);
+    await chat.text("/newcontact");
+    await chat.text("Alice");
+    await chat.text("alice@example.com");
+    await chat.text("+31612345678");
+    await chat.press("skip");
+    await chat.press("consumer");
+    expect(lastText()).toBe('✅ Contact "Alice" added.');
+
+    const contact = await env.DB.prepare(
+      `SELECT c.name, c.type, c.organization_id, e.email, p.phone, a.performed_by
+       FROM contacts c
+       JOIN contact_emails e ON e.contact_id = c.id
+       JOIN contact_phones p ON p.contact_id = c.id
+       JOIN audit_log a ON a.table_name = 'contacts' AND a.record_id = CAST(c.id AS TEXT)`
+    ).first();
+    expect(contact).toEqual({
+      name: "Alice",
+      type: "consumer",
+      organization_id: null,
+      email: "alice@example.com",
+      phone: "+31612345678",
+      performed_by: adminId
+    });
+  });
+
+  it("creates a new organization with a community and links the entrepreneur to it", async () => {
+    await addAdmin(ADMIN);
+    const chat = chatAs(ADMIN);
+    await chat.text("/newcontact");
+    await chat.text("Bob");
+    await chat.press("skip");
+    await chat.press("skip");
+    await chat.press("skip");
+    await chat.press("entrepreneur");
+    await chat.text("Cafe Satoshi");
+    expect(lastText()).toBe('No organization found with the name "Cafe Satoshi".');
+    await chat.press("create_org");
+    await chat.press("accepts-bitcoin");
+    await chat.text("https://cafe.example");
+    await chat.press("skip");
+    await chat.press("choose_other");
+    await chat.press("country:0");
+    // sendMessage serializes reply_markup; press the first community of the country
+    const keyboard = JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard;
+    await chat.press(keyboard[0][0].callback_data);
+    await chat.press("done");
+    expect(lastText()).toMatch(/^✅ Organization "Cafe Satoshi" and contact "Bob" added\. \(communities: .+\)$/);
+
+    const row = await env.DB.prepare(
+      `SELECT o.name, o.status, o.website, c.name AS contact, COUNT(oc.community_id) AS communities
+       FROM organizations o
+       JOIN contacts c ON c.organization_id = o.id
+       LEFT JOIN organization_communities oc ON oc.organization_id = o.id`
+    ).first();
+    expect(row).toEqual({
+      name: "Cafe Satoshi",
+      status: 2,
+      website: "https://cafe.example",
+      contact: "Bob",
+      communities: 1
+    });
+  });
+
+  it("links an entrepreneur to an existing organization", async () => {
+    await addAdmin(ADMIN);
+    const orgId = await env.DB.prepare(
+      "INSERT INTO organizations (name, status) VALUES ('Cafe Satoshi', 2) RETURNING id"
+    ).first<number>("id");
+    const chat = chatAs(ADMIN);
+    await chat.text("/newcontact");
+    await chat.text("Carol");
+    await chat.press("skip");
+    await chat.press("skip");
+    await chat.press("skip");
+    await chat.press("entrepreneur");
+    await chat.text("satoshi");
+    expect(lastText()).toBe("Select an existing organization or create new:");
+    await chat.press(`select_org:${orgId}`);
+    expect(lastText()).toBe('✅ Contact "Carol" added to "Cafe Satoshi".');
+    const contact = await env.DB.prepare("SELECT organization_id FROM contacts WHERE name = 'Carol'").first();
+    expect(contact).toEqual({ organization_id: orgId });
+  });
+
+  it("stores the OpenStreetMap location the user picks", async () => {
+    sent = await resetAndStubFetch({
+      nominatim: [
+        {
+          osm_type: "node",
+          osm_id: 42,
+          class: "amenity",
+          type: "cafe",
+          display_name: "Cafe Satoshi, Leeuwarden",
+          address: { road: "Nieuwestad", city: "Leeuwarden" },
+          extratags: { amenity: "cafe", website: "https://cafe.example" }
+        }
+      ]
+    });
+    await addAdmin(ADMIN);
+    const chat = chatAs(ADMIN);
+    await chat.text("/newcontact");
+    await chat.text("Dave");
+    await chat.press("skip");
+    await chat.press("skip");
+    await chat.press("skip");
+    await chat.press("entrepreneur");
+    await chat.text("Cafe Satoshi");
+    await chat.press("create_org");
+    await chat.press("accepts-bitcoin");
+    await chat.text("https://cafe.example");
+    await chat.press("skip");
+    await chat.press("skip");
+    const choice = sent[sent.length - 1];
+    expect(choice.parse_mode).toBe("HTML");
+    expect(choice.text).toContain("<b>Address:</b> Nieuwestad, Leeuwarden");
+    await chat.press("osmnode:node/42");
+    expect(lastText()).toBe('✅ Organization "Cafe Satoshi" and contact "Dave" added. (OpenStreetMap: node/42)');
+    const org = await env.DB.prepare("SELECT location_osm_id FROM organizations").first();
+    expect(org).toEqual({ location_osm_id: "node/42" });
+  });
+});
+
+describe("/invite", () => {
+  it("is refused for non-admins", async () => {
+    await addAdmin(ADMIN);
+    await env.DB.prepare("INSERT INTO team_members (telegram_id, name) VALUES (?, ?)").bind("7001", "Member").run();
+    await chatAs(7001).text("/invite");
+    expect(lastText()).toBe("Only admins can manage team members.");
+  });
+
+  it("adds the invited team member with the chosen communities", async () => {
+    await addAdmin(ADMIN);
+    const chat = chatAs(ADMIN);
+    await chat.text("/invite");
+    await chat.text("7001");
+    await chat.text("Erin");
+    await chat.text("Europe/Amsterdam");
+    await chat.press("choose_other");
+    await chat.press("country:0");
+    const keyboard = JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard;
+    await chat.press(keyboard[0][0].callback_data);
+    await chat.press("done");
+    await chat.text("confirm");
+    expect(lastText()).toBe('✅ Invitation sent to "Erin" (Telegram ID: 7001).');
+    const member = await env.DB.prepare(
+      `SELECT m.telegram_id, m.time_zone, COUNT(c.community_id) AS communities
+       FROM team_members m LEFT JOIN team_member_communities c ON c.team_member_id = m.id
+       WHERE m.telegram_id = '7001'`
+    ).first();
+    expect(member).toEqual({ telegram_id: "7001", time_zone: "Europe/Amsterdam", communities: 1 });
+  });
+});
+
+describe("/teammember", () => {
+  it("grants admin rights to a team member", async () => {
+    await addAdmin(ADMIN);
+    const memberId = await env.DB.prepare(
+      "INSERT INTO team_members (telegram_id, name) VALUES ('7001', 'Erin') RETURNING id"
+    ).first<number>("id");
+    const chat = chatAs(ADMIN);
+    await chat.text("/teammember");
+    await chat.press("grant_admin");
+    expect(lastText()).toBe("Who should get admin rights?");
+    await chat.press(`member:${memberId}`);
+    expect(lastText()).toBe("✅ Erin is now an admin.");
+    const member = await env.DB.prepare("SELECT is_admin FROM team_members WHERE id = ?").bind(memberId).first();
+    expect(member).toEqual({ is_admin: 1 });
+  });
+});
+
+describe("escapeForOverpass", () => {
+  it("matches the value literally inside a quoted Overpass regex", () => {
+    expect(escapeForOverpass("cafe.example")).toBe("cafe\\\\.example");
+    expect(escapeForOverpass('a"b')).toBe('a\\"b');
+  });
+});

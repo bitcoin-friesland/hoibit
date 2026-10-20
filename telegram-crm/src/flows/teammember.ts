@@ -1,16 +1,17 @@
-import { isValidTelegramId, isValidName } from "../helpers/validation.js";
-import { setStep } from "../helpers/session.js";
-import { errorMessage, successMessage } from "../helpers/messaging.js";
+import { isValidTelegramId, isValidName } from "../helpers/validation";
+import { setStep } from "../helpers/session";
+import { errorMessage, successMessage } from "../helpers/messaging";
 import {
   startCommunityPicker,
   renderCommunityPicker,
   handleCommunityPickerInput,
   pickedCommunities
-} from "../helpers/community.js";
+} from "../helpers/community";
+import type { FlowHandler } from "../types";
 
 const INVITE_PICKER_TITLE = "Select Bitcoin communities for the new team member:";
 
-export async function handleTeamMemberFlow(
+export const handleTeamMemberFlow: FlowHandler = async (
   sendMessage,
   env,
   chatId,
@@ -18,8 +19,7 @@ export async function handleTeamMemberFlow(
   session,
   persistSession = async () => {},
   removeSession = async () => {}
-) {
-  console.log("[TEAMMEMBER FLOW DEBUG] step:", session.step, "| text:", text, "| session:", JSON.stringify(session));
+) => {
   switch (session.step) {
     case "teammember_menu": {
       await sendMessage(env, chatId, "Team member management:\nChoose an action:", {
@@ -50,10 +50,8 @@ export async function handleTeamMemberFlow(
         const granting = action === "grant_admin";
         let members;
         try {
-          const res = await env.crmApi.fetch(new Request(`${env.CRM_API_URL}/team_members`));
-          if (!res.ok) throw new Error(`status ${res.status}`);
-          members = await res.json();
-        } catch (e) {
+          members = await env.crmApi.listTeamMembers();
+        } catch {
           await sendMessage(env, chatId, errorMessage("Could not load team members."));
           await removeSession();
           return;
@@ -131,24 +129,31 @@ export async function handleTeamMemberFlow(
       break;
     }
     case "awaiting_invite_community": {
+      const picker = session.invite_picker;
+      if (!picker) {
+        await sendMessage(env, chatId, errorMessage("Session expired. Please start again with /invite."));
+        await removeSession();
+        return;
+      }
       const cb = session.last_callback_data;
       session.last_callback_data = null;
-      const result = await handleCommunityPickerInput(env, session.invite_picker, cb);
+      const result = await handleCommunityPickerInput(env, picker, cb);
       await persistSession();
       if (result === "updated") {
-        await sendMessage(env, chatId, ...renderCommunityPicker(session.invite_picker, INVITE_PICKER_TITLE));
+        await sendMessage(env, chatId, ...renderCommunityPicker(picker, INVITE_PICKER_TITLE));
       } else if (result === "done" || result === "skip") {
-        session.invite_communities = result === "skip" ? [] : pickedCommunities(session.invite_picker);
+        const communities = result === "skip" ? [] : pickedCommunities(picker);
+        session.invite_communities = communities;
         setStep(session, "awaiting_invite_confirm");
         await persistSession();
         await sendMessage(
           env,
           chatId,
-          session.invite_communities.length > 0
-            ? `Communities selected: ${session.invite_communities.map(c => c.name).join(", ")}. Type 'confirm' to send the invitation or 'cancel' to abort.`
+          communities.length > 0
+            ? `Communities selected: ${communities.map(c => c.name).join(", ")}. Type 'confirm' to send the invitation or 'cancel' to abort.`
             : "No communities selected. Type 'confirm' to send the invitation or 'cancel' to abort."
         );
-      } else if (result.error) {
+      } else if (typeof result === "object") {
         await sendMessage(env, chatId, errorMessage(result.error));
       } else {
         await sendMessage(
@@ -163,20 +168,13 @@ export async function handleTeamMemberFlow(
       const confirmation = text && text.trim().toLowerCase();
       if (confirmation === "confirm") {
         try {
-          const payload = {
-            telegram_id: session.invite_id,
-            name: session.invite_name,
+          const res = await env.crmApi.addTeamMember({
+            telegram_id: session.invite_id ?? "",
+            name: session.invite_name ?? "",
             time_zone: session.invite_timezone,
-            community_ids: session.invite_communities ? session.invite_communities.map(c => c.id) : [],
-            invited_by: session.created_by
-          };
-          const res = await env.crmApi.fetch(
-            new Request(`${env.CRM_API_URL}/team_member`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload)
-            })
-          );
+            community_ids: (session.invite_communities ?? []).map(c => c.id),
+            invited_by: session.created_by ?? null
+          });
           if (res.ok) {
             await sendMessage(
               env,
@@ -190,7 +188,7 @@ export async function handleTeamMemberFlow(
               errorMessage("Failed to send invitation. Please try again or contact support.")
             );
           }
-        } catch (e) {
+        } catch {
           await sendMessage(env, chatId, errorMessage("Error sending invitation."));
         }
         await removeSession();
@@ -210,19 +208,17 @@ export async function handleTeamMemberFlow(
       const choice = session.last_callback_data || "";
       const memberId = choice.startsWith("member:") ? choice.slice("member:".length) : null;
       const memberName = memberId && session.admin_candidates && session.admin_candidates[memberId];
-      if (!memberName) {
+      if (!memberId || !memberName) {
         await sendMessage(env, chatId, errorMessage("Please choose a team member from the buttons, or type /cancel."));
         return;
       }
       const granting = session.admin_action === "grant";
       try {
-        const res = await env.crmApi.fetch(
-          new Request(`${env.CRM_API_URL}/team_member/admin`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ team_member_id: memberId, is_admin: granting, updated_by: session.created_by })
-          })
-        );
+        const res = await env.crmApi.setAdmin({
+          team_member_id: memberId,
+          is_admin: granting,
+          updated_by: session.created_by ?? null
+        });
         if (res.ok) {
           await sendMessage(
             env,
@@ -236,7 +232,7 @@ export async function handleTeamMemberFlow(
         } else {
           await sendMessage(env, chatId, errorMessage("Failed to change admin rights. Please try again."));
         }
-      } catch (e) {
+      } catch {
         await sendMessage(env, chatId, errorMessage("Error changing admin rights."));
       }
       await removeSession();
@@ -247,4 +243,4 @@ export async function handleTeamMemberFlow(
       await removeSession();
       break;
   }
-}
+};
