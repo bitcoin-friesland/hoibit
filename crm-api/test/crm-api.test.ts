@@ -192,32 +192,9 @@ describe("lookups", () => {
   });
 });
 
-// Transitional HTTP API, used by telegram-crm until it calls crm-api over RPC.
-describe("HTTP routes", () => {
-  const post = (path: string, body: unknown) =>
-    crm.fetch(`https://crm-api${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-
-  it("maps refusals to their status and results to JSON", async () => {
-    expect((await post("/validate-user", { telegram_id: 42 })).status).toBe(404);
-    const adminId = await createFirstUser("4242");
-    const member = await post("/validate-user", { telegram_id: 4242 });
-    expect(await member.json()).toMatchObject({ id: adminId, is_admin: 1 });
-
-    const org = await post("/neworg", { name: "Cafe", status: "2" });
-    expect(await org.json()).toMatchObject({ id: 1 });
-    expect((await post("/newcontact", { name: "Alice" })).status).toBe(400);
-    expect(
-      (await post("/team_member/admin", { team_member_id: adminId, is_admin: false, updated_by: adminId })).status
-    ).toBe(409);
-    expect(await (await crm.fetch("https://crm-api/team_members/count")).json()).toEqual({ count: 1 });
-    expect((await crm.fetch("https://crm-api/unknown")).status).toBe(404);
-  });
-
-  it("answers 500 when the database refuses", async () => {
-    expect((await post("/neworg", { name: "Broken", status: 2, community_ids: [9999] })).status).toBe(500);
+describe("HTTP", () => {
+  it("serves no HTTP API", async () => {
+    const res = await crm.fetch("https://crm-api/validate-user", { method: "POST", body: "{}" });
+    expect(res.status).toBe(404);
   });
 });

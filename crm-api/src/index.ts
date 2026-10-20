@@ -1,5 +1,4 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { handleHttp } from "./http";
 import type {
   AddTeamMemberInput,
   Community,
@@ -55,9 +54,9 @@ const created = (value: unknown): Change => ({ old: null, new: value });
  * team_members.is_admin of the acting team member.
  */
 export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
-  // Transitional HTTP API for the telegram-crm version that still calls crm-api with fetch().
-  async fetch(request: Request): Promise<Response> {
-    return handleHttp(request, this);
+  // RPC only; there is no HTTP API.
+  async fetch(): Promise<Response> {
+    return new Response("Not found", { status: 404 });
   }
 
   private get db() {
