@@ -1,30 +1,28 @@
-import PostalMime from "postal-mime";
+import PostalMime, { type Address } from "postal-mime";
 
 // Telegram HTML parse mode: only <, > and & in text need escaping.
-function escapeHtml(text) {
+function escapeHtml(text: string) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function formatAddresses(list: Address[] | Address | undefined) {
+  const addresses = Array.isArray(list) ? list : [list];
+  return addresses
+    .filter(Boolean)
+    .map(a => (a?.name ? `${a.name} <${a.address}>` : a?.address || "(unknown)"))
+    .join(", ");
+}
+
 export default {
-  async email(message, env, ctx) {
+  async email(message, env) {
     const parser = new PostalMime();
     const parsed = await parser.parse(message.raw);
 
     const from = parsed.from?.name
       ? `${parsed.from.name} <${parsed.from.address}>`
       : parsed.from?.address || "(unknown)";
-
-    const toList = Array.isArray(parsed.to) ? parsed.to : [parsed.to];
-    const to = toList
-      .filter(Boolean)
-      .map(t => (t?.name ? `${t.name} <${t.address}>` : t?.address || "(unknown)"))
-      .join(", ");
-
-    const ccList = Array.isArray(parsed.cc) ? parsed.cc : [parsed.cc];
-    const cc = ccList
-      .filter(Boolean)
-      .map(c => (c?.name ? `${c.name} <${c.address}>` : c?.address || "(unknown)"))
-      .join(", ");
+    const to = formatAddresses(parsed.to);
+    const cc = formatAddresses(parsed.cc);
 
     const subject = parsed.subject || "(No subject)";
     const text = parsed.text || "(No content)";
@@ -40,7 +38,7 @@ export default {
     const MAX_MESSAGE_LENGTH = 4096;
 
     // Split the text into chunks if needed
-    const messages = [];
+    const messages: string[] = [];
 
     // Calculate how much space we have for the email content in the first message
     const firstMessageContentSpace = MAX_MESSAGE_LENGTH - header.length;
@@ -98,7 +96,7 @@ export default {
     }
   },
 
-  async fetch(request, env, ctx) {
+  async fetch() {
     return new Response("403 Forbidden: This worker only accepts email traffic via Cloudflare Email Routing.", {
       status: 403,
       headers: {
@@ -107,4 +105,4 @@ export default {
       }
     });
   }
-};
+} satisfies ExportedHandler<Env>;
