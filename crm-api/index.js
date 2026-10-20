@@ -9,7 +9,7 @@ var index_default = {
       }
       try {
         const query = `SELECT * FROM team_members WHERE telegram_id = ?`;
-        const result = await env.DB.prepare(query).bind(parseInt(telegram_id, 10)).all();
+        const result = await env.DB.prepare(query).bind(String(telegram_id)).all();
         const user = result.results && result.results[0];
         if (!user) {
           return new Response("User not found", { status: 404 });
@@ -70,7 +70,7 @@ var index_default = {
         ).bind(
           "update",
           "team_members",
-          parseInt(data.team_member_id, 10),
+          String(data.team_member_id),
           data.updated_by ? parseInt(data.updated_by, 10) : null,
           Object.keys(changedFields).length > 0 ? JSON.stringify({ fields: changedFields }) : null
         ).run();
@@ -88,7 +88,7 @@ var index_default = {
       try {
         const existing = await env.DB.prepare(
           `SELECT id FROM team_members WHERE telegram_id = ?`
-        ).bind(parseInt(data.telegram_id, 10)).first();
+        ).bind(String(data.telegram_id)).first();
         if (existing) {
           if (Array.isArray(data.community_ids) && data.community_ids.length > 0) {
             for (const community_id of data.community_ids) {
@@ -105,11 +105,11 @@ var index_default = {
           return Response.json({ id: existing.id, existing: true });
         }
         const insertQuery = data.time_zone ? `INSERT INTO team_members (telegram_id, name, time_zone) VALUES (?, ?, ?)` : `INSERT INTO team_members (telegram_id, name) VALUES (?, ?)`;
-        const insertParams = data.time_zone ? [parseInt(data.telegram_id, 10), data.name, data.time_zone] : [parseInt(data.telegram_id, 10), data.name];
+        const insertParams = data.time_zone ? [String(data.telegram_id), data.name, data.time_zone] : [String(data.telegram_id), data.name];
         const res = await env.DB.prepare(insertQuery).bind(...insertParams).run();
         const newMember = await env.DB.prepare(
           `SELECT id FROM team_members WHERE telegram_id = ?`
-        ).bind(parseInt(data.telegram_id, 10)).first();
+        ).bind(String(data.telegram_id)).first();
         if (newMember && Array.isArray(data.community_ids) && data.community_ids.length > 0) {
           for (const community_id of data.community_ids) {
             await env.DB.prepare(
@@ -122,7 +122,7 @@ var index_default = {
         ).bind(
           "insert",
           "team_members",
-          parseInt(newMember.id, 10),
+          String(newMember.id),
           data.invited_by ? parseInt(data.invited_by, 10) : null,
           JSON.stringify({
             fields: {
@@ -179,7 +179,7 @@ var index_default = {
         ).bind(
           "insert",
           "contacts",
-          parseInt(contactId, 10),
+          String(contactId),
           data.created_by ? parseInt(data.created_by, 10) : null,
           JSON.stringify({
             fields: {
@@ -220,7 +220,7 @@ var index_default = {
         ).bind(
           "insert",
           "organizations",
-          parseInt(orgIdResult.id, 10),
+          String(orgIdResult.id),
           data.created_by ? parseInt(data.created_by, 10) : null,
           JSON.stringify({
             fields: {
@@ -258,7 +258,7 @@ var index_default = {
         ).bind(
           "insert",
           "conversations",
-          parseInt(data.contact_id, 10),
+          String(data.contact_id),
           data.created_by ? parseInt(data.created_by, 10) : null,
           JSON.stringify({
             fields: {
@@ -283,16 +283,16 @@ var index_default = {
       try {
         const oldMember = await env.DB.prepare(
           `SELECT id, telegram_id, name, time_zone FROM team_members WHERE telegram_id = ?`
-        ).bind(parseInt(telegram_id, 10)).first();
+        ).bind(String(telegram_id)).first();
         const deleteQuery = `DELETE FROM team_members WHERE telegram_id = ?`;
-        const res = await env.DB.prepare(deleteQuery).bind(parseInt(telegram_id, 10)).run();
+        const res = await env.DB.prepare(deleteQuery).bind(String(telegram_id)).run();
         if (oldMember && oldMember.id) {
           await env.DB.prepare(
             `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
           ).bind(
             "delete",
             "team_members",
-            parseInt(oldMember.id, 10),
+            String(oldMember.id),
             null,
             JSON.stringify({
               fields: {
@@ -327,7 +327,7 @@ var index_default = {
         return new Response("Missing telegram_id", { status: 400 });
       }
       try {
-        const member = await env.DB.prepare("SELECT id FROM team_members WHERE telegram_id = ?").bind(parseInt(telegram_id, 10)).first();
+        const member = await env.DB.prepare("SELECT id FROM team_members WHERE telegram_id = ?").bind(String(telegram_id)).first();
         if (!member || !member.id) {
           return new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } });
         }
@@ -511,21 +511,21 @@ var index_default = {
           ? `INSERT INTO team_members (telegram_id, name, time_zone) VALUES (?, ?, ?)`
           : `INSERT INTO team_members (telegram_id, name) VALUES (?, ?)`;
         const insertParams = data.time_zone
-          ? [parseInt(data.telegram_id, 10), data.name, data.time_zone]
-          : [parseInt(data.telegram_id, 10), data.name];
+          ? [String(data.telegram_id), data.name, data.time_zone]
+          : [String(data.telegram_id), data.name];
         console.log("First user registration: insertQuery and params", { insertQuery, insertParams });
         const res = await env.DB.prepare(insertQuery).bind(...insertParams).run();
         console.log("First user registration: insert result", { res });
         const newMember = await env.DB.prepare(
           `SELECT id FROM team_members WHERE telegram_id = ?`
-        ).bind(parseInt(data.telegram_id, 10)).first();
+        ).bind(String(data.telegram_id)).first();
         console.log("First user registration: newMember select result", { newMember });
         await env.DB.prepare(
           `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
         ).bind(
           "insert",
           "team_members",
-          parseInt(newMember.id, 10),
+          String(newMember.id),
           null,
           JSON.stringify({
             fields: {
