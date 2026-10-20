@@ -38,9 +38,15 @@ var index_default = {
         return new Response("Missing team_member_id", { status: 400 });
       }
       try {
+        if (!(await isAdmin(env, data.updated_by))) {
+          return new Response("Only admins can update team members", { status: 403 });
+        }
         const oldMember = await env.DB.prepare(
           `SELECT name, time_zone FROM team_members WHERE id = ?`
         ).bind(parseInt(data.team_member_id, 10)).first();
+        if (!oldMember) {
+          return new Response("Team member not found", { status: 404 });
+        }
         let changedFields = {};
         if (data.name || data.time_zone) {
           let setParts = [];
@@ -289,33 +295,57 @@ var index_default = {
       }
     }
     if (request.method === "POST" && url.pathname === "/delete-team-member") {
-      const { telegram_id } = await request.json();
+      const { telegram_id, performed_by } = await request.json();
       if (!telegram_id) {
         return new Response("Missing telegram_id", { status: 400 });
       }
       try {
+        if (!(await isAdmin(env, performed_by))) {
+          return new Response("Only admins can delete team members", { status: 403 });
+        }
         const oldMember = await env.DB.prepare(
-          `SELECT id, telegram_id, name, time_zone FROM team_members WHERE telegram_id = ?`
+          `SELECT id, telegram_id, name, time_zone, is_admin FROM team_members WHERE telegram_id = ?`
         ).bind(String(telegram_id)).first();
-        const deleteQuery = `DELETE FROM team_members WHERE telegram_id = ?`;
-        const res = await env.DB.prepare(deleteQuery).bind(String(telegram_id)).run();
-        if (oldMember && oldMember.id) {
-          await env.DB.prepare(
+        if (!oldMember) {
+          return new Response("Team member not found", { status: 404 });
+        }
+        if (oldMember.is_admin === 1) {
+          const admins = await env.DB.prepare(
+            `SELECT COUNT(*) AS count FROM team_members WHERE is_admin = 1`
+          ).first();
+          if (admins.count <= 1) {
+            return new Response("Cannot delete the last admin", { status: 409 });
+          }
+        }
+        // audit_log.performed_by references team_members(id); history is kept, so a member
+        // who performed audited actions cannot be deleted (foreign key violation).
+        const history = await env.DB.prepare(
+          `SELECT COUNT(*) AS count FROM audit_log WHERE performed_by = ?`
+        ).bind(parseInt(oldMember.id, 10)).first();
+        if (history.count > 0) {
+          return new Response("Team member has audit history and cannot be deleted", { status: 409 });
+        }
+        // One transaction: community links, the member and the audit entry together.
+        await env.DB.batch([
+          env.DB.prepare(`DELETE FROM team_member_communities WHERE team_member_id = ?`).bind(parseInt(oldMember.id, 10)),
+          env.DB.prepare(`DELETE FROM team_members WHERE id = ?`).bind(parseInt(oldMember.id, 10)),
+          env.DB.prepare(
             `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
           ).bind(
             "delete",
             "team_members",
             String(oldMember.id),
-            null,
+            parseInt(performed_by, 10),
             JSON.stringify({
               fields: {
                 telegram_id: { old: oldMember.telegram_id, new: null },
                 name: { old: oldMember.name, new: null },
-                time_zone: { old: oldMember.time_zone, new: null }
+                time_zone: { old: oldMember.time_zone, new: null },
+                is_admin: { old: oldMember.is_admin, new: null }
               }
             })
-          ).run();
-        }
+          )
+        ]);
         return new Response("Team member deleted", { status: 200 });
       } catch (error) {
         console.error("Error deleting team member:", error);
