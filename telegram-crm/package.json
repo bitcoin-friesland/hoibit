@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "types": "wrangler types"
+    "types": "wrangler types",
+    "test": "vitest run"
   },
   "license": "ISC",
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.6",
+    "vitest": "^5.0.5",
     "wrangler": "^4.151.3"
   }
 }

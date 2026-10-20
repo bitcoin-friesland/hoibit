@@ -13,8 +13,5 @@ build/
 .idea/
 .clinerules/
 
-# Others
-schema.sql
-
 # Gedownloade gedeployde Worker-broncode (vergelijking)
 .deployed/
