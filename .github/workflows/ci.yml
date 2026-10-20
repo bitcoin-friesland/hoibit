@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker: [crm-api, telegram-crm]
+        worker: [crm-api, telegram-crm, mail-to-tg]
     defaults:
       run:
         working-directory: ${{ matrix.worker }}

@@ -4,4 +4,3 @@ node_modules/
 .clinerules/
 dist/
 package-lock.json
-mail-to-tg/
