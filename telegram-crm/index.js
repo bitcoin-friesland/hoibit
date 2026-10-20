@@ -41,12 +41,28 @@ async function sendMessage(env, chatId, text, options = {}) {
   });
 }
 
+// Verify the request comes from Telegram: setWebhook was called with
+// secret_token = TELEGRAM_WEBHOOK_SECRET, Telegram echoes it in this header.
+// Fails closed when the secret is not configured.
+function isFromTelegram(request, env) {
+  const expected = env.TELEGRAM_WEBHOOK_SECRET;
+  const received = request.headers.get("X-Telegram-Bot-Api-Secret-Token");
+  if (!expected || !received) return false;
+  const encoder = new TextEncoder();
+  const a = encoder.encode(expected);
+  const b = encoder.encode(received);
+  return a.byteLength === b.byteLength && crypto.subtle.timingSafeEqual(a, b);
+}
+
 // Main fetch handler
 var index_default = {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method !== "POST" || url.pathname !== "/") {
       return new Response("Not found", { status: 404 });
+    }
+    if (!isFromTelegram(request, env)) {
+      return new Response("Unauthorized", { status: 401 });
     }
     const update = await request.json();
     // Log update for debugging repeated unauthorized messages

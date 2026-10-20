@@ -22,31 +22,73 @@ export default {
       .join(", ");
 
     const subject = parsed.subject || "(No subject)";
-    const text = parsed.text?.substring(0, 1000) || "(No content)";
+    const text = parsed.text || "(No content)";
 
-    let messageBody = `📩 *New Email*\n👤 From: ${from}\n📬 To: ${to}`;
+    // Build the header for the first message
+    let header = `📩 *New Email*\n👤 From: ${from}\n📬 To: ${to}`;
     if (cc) {
-      messageBody += `\n🟡 CC: ${cc}`;
+      header += `\n🟡 CC: ${cc}`;
     }
-    messageBody += `\n📝 Subject: ${subject}\n\n${text}`;
+    header += `\n📝 Subject: ${subject}\n\n`;
 
-    try {
-      const resp = await fetch(
-        `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: env.TELEGRAM_CHAT_ID,
-            text: messageBody,
-            parse_mode: "Markdown",
-          }),
+    // Telegram message limit is 4096 characters
+    const MAX_MESSAGE_LENGTH = 4096;
+    
+    // Split the text into chunks if needed
+    const messages = [];
+    
+    // Calculate how much space we have for the email content in the first message
+    const firstMessageContentSpace = MAX_MESSAGE_LENGTH - header.length;
+    
+    if (text.length <= firstMessageContentSpace) {
+      // Email fits in one message
+      messages.push(header + text);
+    } else {
+      // Email needs to be split into multiple messages
+      // First message with header
+      messages.push(header + text.substring(0, firstMessageContentSpace));
+      
+      // Subsequent messages without any markers for smooth reading
+      let remaining = text.substring(firstMessageContentSpace);
+      
+      while (remaining.length > 0) {
+        if (remaining.length <= MAX_MESSAGE_LENGTH) {
+          // Last chunk
+          messages.push(remaining);
+          remaining = "";
+        } else {
+          // More chunks to follow
+          messages.push(remaining.substring(0, MAX_MESSAGE_LENGTH));
+          remaining = remaining.substring(MAX_MESSAGE_LENGTH);
         }
-      );
+      }
+    }
 
-      const body = await resp.text();
-      console.log("Telegram response status:", resp.status);
-      console.log("Telegram response body:", body);
+    // Send all message parts
+    try {
+      for (let i = 0; i < messages.length; i++) {
+        const resp = await fetch(
+          `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: env.TELEGRAM_CHAT_ID,
+              text: messages[i],
+              parse_mode: "Markdown",
+            }),
+          }
+        );
+
+        const body = await resp.text();
+        console.log(`Telegram response status (part ${i + 1}/${messages.length}):`, resp.status);
+        console.log(`Telegram response body (part ${i + 1}/${messages.length}):`, body);
+        
+        // Small delay between messages to avoid rate limiting
+        if (i < messages.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
     } catch (err) {
       console.error("Failed to send to Telegram:", err);
     }
