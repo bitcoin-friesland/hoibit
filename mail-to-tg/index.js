@@ -1,5 +1,10 @@
 import PostalMime from "postal-mime";
 
+// Telegram HTML parse mode: only <, > and & in text need escaping.
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export default {
   async email(message, env, ctx) {
     const parser = new PostalMime();
@@ -24,8 +29,8 @@ export default {
     const subject = parsed.subject || "(No subject)";
     const text = parsed.text || "(No content)";
 
-    // Build the header for the first message
-    let header = `📩 *New Email*\n👤 From: ${from}\n📬 To: ${to}`;
+    // Build the header for the first message (plain text; escaped per message when sending)
+    let header = `📩 New Email\n👤 From: ${from}\n📬 To: ${to}`;
     if (cc) {
       header += `\n🟡 CC: ${cc}`;
     }
@@ -64,9 +69,11 @@ export default {
       }
     }
 
-    // Send all message parts
+    // Send all message parts. Escaping happens after splitting, so no entity is cut in half;
+    // Telegram's 4096 limit counts characters after entity parsing.
     try {
       for (let i = 0; i < messages.length; i++) {
+        const html = escapeHtml(messages[i]);
         const resp = await fetch(
           `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`,
           {
@@ -74,8 +81,8 @@ export default {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: env.TELEGRAM_CHAT_ID,
-              text: messages[i],
-              parse_mode: "Markdown",
+              text: i === 0 ? html.replace("📩 New Email", "📩 <b>New Email</b>") : html,
+              parse_mode: "HTML",
             }),
           }
         );
