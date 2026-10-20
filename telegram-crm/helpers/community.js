@@ -15,9 +15,7 @@
 async function fetchUserCommunities(env, userId) {
   // Fetch user's current communities from crm-api
   const url = `${env.CRM_API_URL}/team_member_communities?telegram_id=${userId}`;
-  const res = await env.crmApi.fetch(new Request(url, {
-    headers: { 'Authorization': `Bearer ${env.API_TOKEN}` }
-  }));
+  const res = await env.crmApi.fetch(new Request(url));
   if (!res.ok) throw new Error('Failed to fetch user communities');
   return await res.json();
 }
@@ -25,9 +23,7 @@ async function fetchUserCommunities(env, userId) {
 export async function fetchCountries(env) {
   // Fetch unique countries from bitcoin_communities table
   const url = `${env.CRM_API_URL}/community_countries`;
-  const res = await env.crmApi.fetch(new Request(url, {
-    headers: { 'Authorization': `Bearer ${env.API_TOKEN}` }
-  }));
+  const res = await env.crmApi.fetch(new Request(url));
   if (!res.ok) throw new Error('Failed to fetch countries');
   return await res.json();
 }
@@ -35,9 +31,7 @@ export async function fetchCountries(env) {
 export async function fetchCommunitiesByCountry(env, country) {
   // Fetch all communities in a country
   const url = `${env.CRM_API_URL}/bitcoin_communities?country=${encodeURIComponent(country)}`;
-  const res = await env.crmApi.fetch(new Request(url, {
-    headers: { 'Authorization': `Bearer ${env.API_TOKEN}` }
-  }));
+  const res = await env.crmApi.fetch(new Request(url));
   if (!res.ok) throw new Error('Failed to fetch communities');
   return await res.json();
 }
@@ -73,9 +67,7 @@ export async function selectCommunities({
 export async function selectCommunitiesList(env, userId) {
   // Fetch user's current communities from crm-api
   const url = `${env.CRM_API_URL}/team_member_communities?telegram_id=${userId}`;
-  const res = await env.crmApi.fetch(new Request(url, {
-    headers: { 'Authorization': `Bearer ${env.API_TOKEN}` }
-  }));
+  const res = await env.crmApi.fetch(new Request(url));
   if (!res.ok) throw new Error('Failed to fetch user communities');
   return await res.json();
 }

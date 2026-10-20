@@ -1,4 +1,14 @@
 // index.js
+
+// Only admins (team_members.is_admin = 1) may add team members or change admin rights.
+async function isAdmin(env, teamMemberId) {
+  if (!teamMemberId) return false;
+  const row = await env.DB.prepare(
+    `SELECT is_admin FROM team_members WHERE id = ?`
+  ).bind(parseInt(teamMemberId, 10)).first();
+  return !!row && row.is_admin === 1;
+}
+
 var index_default = {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -86,6 +96,9 @@ var index_default = {
         return new Response("Missing telegram_id or name", { status: 400 });
       }
       try {
+        if (!(await isAdmin(env, data.invited_by))) {
+          return new Response("Only admins can add team members", { status: 403 });
+        }
         const existing = await env.DB.prepare(
           `SELECT id FROM team_members WHERE telegram_id = ?`
         ).bind(String(data.telegram_id)).first();
@@ -468,6 +481,60 @@ var index_default = {
         return new Response("Failed to count team_members", { status: 500 });
       }
     }
+    if (request.method === "GET" && url.pathname === "/team_members") {
+      try {
+        const result = await env.DB.prepare(
+          `SELECT id, telegram_id, name, is_admin FROM team_members ORDER BY name`
+        ).all();
+        return Response.json(result.results || []);
+      } catch (error) {
+        console.error("Error listing team_members:", error);
+        return new Response("Failed to list team_members", { status: 500 });
+      }
+    }
+    if (request.method === "POST" && url.pathname === "/team_member/admin") {
+      const data = await request.json();
+      if (!data.team_member_id || typeof data.is_admin !== "boolean") {
+        return new Response("Missing team_member_id or is_admin", { status: 400 });
+      }
+      try {
+        if (!(await isAdmin(env, data.updated_by))) {
+          return new Response("Only admins can change admin rights", { status: 403 });
+        }
+        const member = await env.DB.prepare(
+          `SELECT id, is_admin FROM team_members WHERE id = ?`
+        ).bind(parseInt(data.team_member_id, 10)).first();
+        if (!member) {
+          return new Response("Team member not found", { status: 404 });
+        }
+        const newValue = data.is_admin ? 1 : 0;
+        if (member.is_admin === newValue) {
+          return Response.json({ id: member.id, is_admin: newValue, changed: false });
+        }
+        // Revoking only succeeds while another admin remains, checked in the same statement.
+        const res = await env.DB.prepare(
+          newValue === 1
+            ? `UPDATE team_members SET is_admin = 1 WHERE id = ?`
+            : `UPDATE team_members SET is_admin = 0 WHERE id = ? AND (SELECT COUNT(*) FROM team_members WHERE is_admin = 1) > 1`
+        ).bind(parseInt(member.id, 10)).run();
+        if (!res.meta || res.meta.changes !== 1) {
+          return new Response("Cannot revoke the last admin", { status: 409 });
+        }
+        await env.DB.prepare(
+          `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ?, ?, ?)`
+        ).bind(
+          "update",
+          "team_members",
+          String(member.id),
+          parseInt(data.updated_by, 10),
+          JSON.stringify({ fields: { is_admin: { old: member.is_admin, new: newValue } } })
+        ).run();
+        return Response.json({ id: member.id, is_admin: newValue, changed: true });
+      } catch (error) {
+        console.error("Error changing admin rights:", error);
+        return new Response("Failed to change admin rights", { status: 500 });
+      }
+    }
     if (request.method === "POST" && url.pathname === "/organization_communities") {
       const data = await request.json();
       if (!data.organization_id || !Array.isArray(data.community_ids)) {
@@ -506,10 +573,10 @@ var index_default = {
           console.warn("First user registration not allowed: team members already exist", { countResult, data });
           return new Response("First user registration not allowed: team members already exist", { status: 409 });
         }
-        // Insert new team member (reuse logic from /team_member)
+        // Insert new team member (reuse logic from /team_member); the first user is admin
         const insertQuery = data.time_zone
-          ? `INSERT INTO team_members (telegram_id, name, time_zone) VALUES (?, ?, ?)`
-          : `INSERT INTO team_members (telegram_id, name) VALUES (?, ?)`;
+          ? `INSERT INTO team_members (telegram_id, name, time_zone, is_admin) VALUES (?, ?, ?, 1)`
+          : `INSERT INTO team_members (telegram_id, name, is_admin) VALUES (?, ?, 1)`;
         const insertParams = data.time_zone
           ? [String(data.telegram_id), data.name, data.time_zone]
           : [String(data.telegram_id), data.name];
@@ -531,7 +598,8 @@ var index_default = {
             fields: {
               telegram_id: { old: null, new: data.telegram_id },
               name: { old: null, new: data.name },
-              ...(data.time_zone ? { time_zone: { old: null, new: data.time_zone } } : {})
+              ...(data.time_zone ? { time_zone: { old: null, new: data.time_zone } } : {}),
+              is_admin: { old: null, new: 1 }
             }
           })
         ).run();

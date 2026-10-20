@@ -135,7 +135,8 @@ CREATE TABLE team_members (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_id TEXT,
   name TEXT,
-  time_zone TEXT
+  time_zone TEXT,
+  is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)) -- may add team members and change admin rights
 );
 
 -- team member communities (many-to-many)

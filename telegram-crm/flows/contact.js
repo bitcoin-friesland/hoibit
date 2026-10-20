@@ -125,7 +125,7 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
             `${env.CRM_API_URL}/newcontact`,
             {
               method: "POST",
-              headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+              headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 name: session.name,
                 type: session.type,
@@ -189,7 +189,7 @@ export async function handleContactFlow(sendMessage, env, chatId, text, session,
       try {
         const searchRes = await env.crmApi.fetch(new Request(
           `${env.CRM_API_URL}/organizations/search?name=${encodeURIComponent(org)}`,
-          { method: "GET", headers: { "Authorization": `Bearer ${env.API_TOKEN}` } }
+          { method: "GET" }
         ));
         if (searchRes.ok) {
           const data = await searchRes.json();
@@ -592,7 +592,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
               `${env.CRM_API_URL}/neworg`,
               {
                 method: "POST",
-                headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(orgPayload)
               }
             ));
@@ -606,7 +606,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
               const searchUrl = `${env.CRM_API_URL}/organizations/search?name=${encodeURIComponent(session.organization)}`;
               const searchRes = await env.crmApi.fetch(new Request(
                 searchUrl,
-                { method: "GET", headers: { "Authorization": `Bearer ${env.API_TOKEN}` } }
+                { method: "GET" }
               ));
               if (searchRes.ok) {
                 const orgs = await searchRes.json();
@@ -637,7 +637,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
               `${env.CRM_API_URL}/newcontact`,
               {
                 method: "POST",
-                headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(contactPayload)
               }
             ));
@@ -703,7 +703,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
           `${env.CRM_API_URL}/neworg`,
           {
             method: "POST",
-            headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify(orgPayload)
           }
         ));
@@ -717,7 +717,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
           const searchUrl = `${env.CRM_API_URL}/organizations/search?name=${encodeURIComponent(session.organization)}`;
           const searchRes = await env.crmApi.fetch(new Request(
             searchUrl,
-            { method: "GET", headers: { "Authorization": `Bearer ${env.API_TOKEN}` } }
+            { method: "GET" }
           ));
           if (searchRes.ok) {
             const orgs = await searchRes.json();
@@ -750,7 +750,7 @@ ${item.phone ? `*Phone:* ${item.phone}\n` : ""}${item.email ? `*Email:* ${item.e
           `${env.CRM_API_URL}/newcontact`,
           {
             method: "POST",
-            headers: { "Authorization": `Bearer ${env.API_TOKEN}`, "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify(contactPayload)
           }
         ));
