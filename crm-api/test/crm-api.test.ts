@@ -40,6 +40,15 @@ async function createFirstUser(telegramId = "1001") {
   return res.id;
 }
 
+// Adds a team member through an invite of adminId, as the bot does.
+async function addMember(adminId: number, telegramId: string, name: string, communityIds: number[] = []) {
+  const invite = await crm.createInvite({ invited_by: adminId, community_ids: communityIds });
+  if (!invite.ok) throw new Error(invite.error);
+  const res = await crm.acceptInvite({ token: invite.token, telegram_id: telegramId, name });
+  if (!res.ok) throw new Error(res.error);
+  return res.id;
+}
+
 const auditCount = async () => (await env.DB.prepare("SELECT COUNT(*) AS n FROM audit_log").first<{ n: number }>())!.n;
 
 async function lastAudit(action: string) {
@@ -83,87 +92,6 @@ describe("validateUser", () => {
     expect(await crm.validateUser(42)).toBeNull();
     await createFirstUser("4242");
     expect(await crm.validateUser(4242)).toMatchObject({ name: "Admin", is_admin: 1 });
-  });
-});
-
-describe("addTeamMember", () => {
-  it("only lets admins add members", async () => {
-    const res = await crm.addTeamMember({ telegram_id: "2001", name: "Bob", invited_by: 999 });
-    expect(res).toMatchObject({ ok: false, status: 403 });
-  });
-
-  it("adds a member with communities and a digits-only audit record_id", async () => {
-    const adminId = await createFirstUser();
-    const res = await crm.addTeamMember({ telegram_id: 2001, name: "Bob", community_ids: [1, 2], invited_by: adminId });
-    if (!res.ok) throw new Error(res.error);
-    expect(res.created).toBe(true);
-
-    const communities = await env.DB.prepare(
-      "SELECT community_id FROM team_member_communities WHERE team_member_id = ? ORDER BY community_id"
-    )
-      .bind(res.id)
-      .all<{ community_id: number }>();
-    expect(communities.results.map(r => r.community_id)).toEqual([1, 2]);
-
-    const audit = await env.DB.prepare(
-      "SELECT record_id, performed_by FROM audit_log WHERE table_name = 'team_members' ORDER BY id DESC LIMIT 1"
-    ).first();
-    expect(audit).toEqual({ record_id: String(res.id), performed_by: adminId });
-  });
-
-  it("adds communities to an existing member without a second row", async () => {
-    const adminId = await createFirstUser();
-    const res = await crm.addTeamMember({
-      telegram_id: "1001",
-      name: "Admin",
-      community_ids: [3],
-      invited_by: adminId
-    });
-    expect(res).toEqual({ ok: true, id: adminId, existing: true });
-    expect(await crm.teamMemberCommunities("1001")).toMatchObject([{ id: 3 }]);
-  });
-
-  it("audits adding communities to an existing member", async () => {
-    const adminId = await createFirstUser();
-    const before = await auditCount();
-    await crm.addTeamMember({
-      telegram_id: "1001",
-      name: "Admin",
-      community_ids: [3],
-      time_zone: "Europe/Amsterdam",
-      invited_by: adminId
-    });
-    expect(await auditCount()).toBe(before + 1);
-    expect(await lastAudit("update")).toMatchObject({
-      record_id: String(adminId),
-      performed_by: adminId,
-      details: {
-        fields: {
-          time_zone: { old: null, new: "Europe/Amsterdam" },
-          community_ids: { old: [], new: [3] }
-        }
-      }
-    });
-  });
-
-  it("writes no audit entry when an existing member does not change", async () => {
-    const adminId = await createFirstUser();
-    await crm.addTeamMember({ telegram_id: "1001", name: "Admin", community_ids: [3], invited_by: adminId });
-    const before = await auditCount();
-    const res = await crm.addTeamMember({
-      telegram_id: "1001",
-      name: "Admin",
-      community_ids: [3],
-      invited_by: adminId
-    });
-    expect(res).toEqual({ ok: true, id: adminId, existing: true });
-    expect(await auditCount()).toBe(before);
-  });
-
-  it("logs the communities of a new member", async () => {
-    const adminId = await createFirstUser();
-    await crm.addTeamMember({ telegram_id: "2001", name: "Bob", community_ids: [2, 1], invited_by: adminId });
-    expect((await lastAudit("insert")).details.fields.community_ids).toEqual({ old: null, new: [2, 1] });
   });
 });
 
@@ -439,16 +367,7 @@ describe("setAdmin", () => {
 });
 
 describe("deleteTeamMember", () => {
-  async function addBob(adminId: number) {
-    const added = await crm.addTeamMember({
-      telegram_id: "2001",
-      name: "Bob",
-      community_ids: [1],
-      invited_by: adminId
-    });
-    if (!added.ok) throw new Error(added.error);
-    return added.id;
-  }
+  const addBob = (adminId: number) => addMember(adminId, "2001", "Bob", [1]);
 
   it("removes (deactivates) a member who ever saved something; they lose access", async () => {
     const adminId = await createFirstUser();
@@ -485,9 +404,24 @@ describe("deleteTeamMember", () => {
     expect(await crm.countTeamMembers()).toBe(2);
   });
 
-  it("deletes a member without history", async () => {
+  it("deactivates a member who joined with an invite link", async () => {
     const adminId = await createFirstUser();
     const bobId = await addBob(adminId);
+    expect(await crm.deleteTeamMember({ telegram_id: "2001", performed_by: adminId })).toEqual({
+      ok: true,
+      deactivated: true
+    });
+    expect(await env.DB.prepare("SELECT telegram_id FROM team_members WHERE id = ?").bind(bobId).first()).toEqual({
+      telegram_id: null
+    });
+  });
+
+  it("deletes a member without history", async () => {
+    const adminId = await createFirstUser();
+    // Members without an invite were added before invite links existed.
+    const { id: bobId } = (await env.DB.prepare(
+      "INSERT INTO team_members (telegram_id, name) VALUES ('2001', 'Bob') RETURNING id"
+    ).first<{ id: number }>())!;
     expect(await crm.deleteTeamMember({ telegram_id: "2001", performed_by: adminId })).toEqual({
       ok: true,
       deactivated: false
@@ -808,6 +742,224 @@ describe("getContact", () => {
   });
 });
 
+describe("contactDetails", () => {
+  it("returns the contact's details and its most recent conversations, or null", async () => {
+    const adminId = await createFirstUser();
+    const org = await crm.newOrg({ name: "Cafe Satoshi", status: 2 });
+    if (!org.ok) throw new Error(org.error);
+    const res = await crm.newContact({
+      name: "Anna",
+      type: "entrepreneur",
+      organization_id: org.id,
+      email: "anna@example.com",
+      phone: "+31612345678",
+      nostr_npub: "npub1anna"
+    });
+    if (!res.ok) throw new Error(res.error);
+    await env.DB.prepare("INSERT INTO contact_emails (contact_id, email) VALUES (?, ?)")
+      .bind(res.id, "anna@satoshi.cafe")
+      .run();
+    await crm.logConversation({ contact_id: res.id, channel: "phone", note: "First call", created_by: adminId });
+    // Logged before conversations had created_by: the team member comes from the audit entry.
+    await crm.logConversation({ contact_id: res.id, channel: "in-person", created_by: adminId });
+    await env.DB.prepare("UPDATE conversations SET created_by = NULL WHERE note IS NULL").run();
+
+    const details = await crm.contactDetails(String(res.id));
+    expect(details).toMatchObject({
+      id: res.id,
+      name: "Anna",
+      type: "entrepreneur",
+      type_label: "Entrepreneur",
+      organization_id: org.id,
+      organization_name: "Cafe Satoshi",
+      nostr_npub: "npub1anna",
+      emails: ["anna@example.com", "anna@satoshi.cafe"],
+      phones: ["+31612345678"],
+      conversations: [
+        { contact_id: res.id, contact_name: "Anna", channel: "In Person", note: null, logged_by: "Admin" },
+        { contact_id: res.id, contact_name: "Anna", channel: "Phone", note: "First call", logged_by: "Admin" }
+      ]
+    });
+    expect(details!.conversations[0].logged_at).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+    expect((await crm.contactDetails(res.id, 1))!.conversations).toHaveLength(1);
+    expect(await crm.contactDetails(9999)).toBeNull();
+  });
+});
+
+describe("organizationDetails", () => {
+  it("returns the organization with status, communities, contacts and their conversations, or null", async () => {
+    const org = await crm.newOrg({ name: "Cafe Satoshi", status: 2, website: "satoshi.cafe", community_ids: [1] });
+    if (!org.ok) throw new Error(org.error);
+    const add = async (name: string) => {
+      const res = await crm.newContact({ name, type: "entrepreneur", organization_id: org.id });
+      if (!res.ok) throw new Error(res.error);
+      return res.id;
+    };
+    const bram = await add("Bram");
+    const anna = await add("Anna");
+    await crm.newContact({ name: "Elsewhere", type: "consumer" });
+    await crm.logConversation({ contact_id: bram, channel: "phone" });
+    await crm.logConversation({ contact_id: anna, channel: "email", note: "Sent the brochure" });
+
+    const community = await env.DB.prepare("SELECT name FROM bitcoin_communities WHERE id = 1").first<{
+      name: string;
+    }>();
+    expect(await crm.organizationDetails(String(org.id))).toEqual({
+      id: org.id,
+      name: "Cafe Satoshi",
+      status: 2,
+      status_label: "Accepts Bitcoin",
+      website: "satoshi.cafe",
+      nostr_npub: null,
+      location_osm_id: null,
+      communities: [community!.name],
+      contacts: [
+        { id: anna, name: "Anna" },
+        { id: bram, name: "Bram" }
+      ],
+      conversations: [
+        expect.objectContaining({ contact_name: "Anna", channel: "Email", note: "Sent the brochure", logged_by: null }),
+        expect.objectContaining({ contact_name: "Bram", channel: "Phone", note: null })
+      ]
+    });
+    expect(await crm.organizationDetails(9999)).toBeNull();
+  });
+});
+
+describe("updateContact", () => {
+  async function createAnna() {
+    const res = await crm.newContact({
+      name: "Anna",
+      type: "consumer",
+      email: "anna@example.com",
+      nostr_npub: "npub1anna"
+    });
+    if (!res.ok) throw new Error(res.error);
+    return res.id;
+  }
+
+  it("changes only the given details, in one audited update", async () => {
+    const adminId = await createFirstUser();
+    const id = await createAnna();
+    const before = await auditCount();
+    const res = await crm.updateContact({
+      contact_id: String(id),
+      name: " Anna de Vries ",
+      email: "anna@devries.nl",
+      phone: "0031 6 12345678",
+      nostr_npub: null,
+      updated_by: adminId
+    });
+    expect(res).toEqual({ ok: true, changed: true });
+    expect(await crm.contactDetails(id)).toMatchObject({
+      name: "Anna de Vries",
+      type: "consumer",
+      emails: ["anna@devries.nl"],
+      phones: ["+31612345678"],
+      nostr_npub: null
+    });
+    expect(await auditCount()).toBe(before + 1);
+    expect(await lastAudit("update")).toEqual({
+      record_id: String(id),
+      performed_by: adminId,
+      change_details: expect.any(String),
+      details: {
+        fields: {
+          name: { old: "Anna", new: "Anna de Vries" },
+          nostr_npub: { old: "npub1anna", new: null },
+          email: { old: "anna@example.com", new: "anna@devries.nl" },
+          phone: { old: null, new: "+31612345678" }
+        }
+      }
+    });
+  });
+
+  it("removes the first email address and keeps the others", async () => {
+    const id = await createAnna();
+    await env.DB.prepare("INSERT INTO contact_emails (contact_id, email) VALUES (?, ?)")
+      .bind(id, "second@example.com")
+      .run();
+    expect(await crm.updateContact({ contact_id: id, email: "" })).toEqual({ ok: true, changed: true });
+    expect((await crm.contactDetails(id))!.emails).toEqual(["second@example.com"]);
+  });
+
+  it("writes nothing when nothing changes", async () => {
+    const id = await createAnna();
+    const before = await auditCount();
+    expect(await crm.updateContact({ contact_id: id, name: "Anna", email: "anna@example.com" })).toEqual({
+      ok: true,
+      changed: false
+    });
+    expect(await crm.updateContact({ contact_id: id })).toEqual({ ok: true, changed: false });
+    expect(await auditCount()).toBe(before);
+  });
+
+  it("refuses an empty name, a national phone number and an unknown contact", async () => {
+    const id = await createAnna();
+    expect(await crm.updateContact({ contact_id: id, name: " " })).toMatchObject({ ok: false, status: 400 });
+    expect(await crm.updateContact({ contact_id: id, phone: "06 12345678" })).toMatchObject({ ok: false, status: 400 });
+    expect(await crm.updateContact({ contact_id: 9999, name: "Bob" })).toMatchObject({ ok: false, status: 404 });
+    expect((await crm.contactDetails(id))!.phones).toEqual([]);
+  });
+});
+
+describe("updateOrg", () => {
+  async function createCafe() {
+    const res = await crm.newOrg({ name: "Cafe Satoshi", status: 1, website: "satoshi.cafe" });
+    if (!res.ok) throw new Error(res.error);
+    return res.id;
+  }
+
+  it("changes the status and other details, in one audited update", async () => {
+    const adminId = await createFirstUser();
+    const id = await createCafe();
+    const res = await crm.updateOrg({
+      organization_id: String(id),
+      status: "2",
+      website: null,
+      nostr_npub: "npub1cafe",
+      updated_by: adminId
+    });
+    expect(res).toEqual({ ok: true, changed: true });
+    expect(await crm.organizationDetails(id)).toMatchObject({
+      name: "Cafe Satoshi",
+      status: 2,
+      status_label: "Accepts Bitcoin",
+      website: null,
+      nostr_npub: "npub1cafe"
+    });
+    expect(await lastAudit("update")).toMatchObject({
+      record_id: String(id),
+      performed_by: adminId,
+      details: {
+        fields: {
+          status: { old: 1, new: 2 },
+          website: { old: "satoshi.cafe", new: null },
+          nostr_npub: { old: null, new: "npub1cafe" }
+        }
+      }
+    });
+  });
+
+  it("writes nothing when nothing changes", async () => {
+    const id = await createCafe();
+    const before = await auditCount();
+    expect(await crm.updateOrg({ organization_id: id, status: 1, name: "Cafe Satoshi" })).toEqual({
+      ok: true,
+      changed: false
+    });
+    expect(await auditCount()).toBe(before);
+  });
+
+  it("refuses an unknown status, an empty name and an unknown organization", async () => {
+    const id = await createCafe();
+    expect(await crm.updateOrg({ organization_id: id, status: 99 })).toMatchObject({ ok: false, status: 400 });
+    expect(await crm.updateOrg({ organization_id: id, name: "" })).toMatchObject({ ok: false, status: 400 });
+    expect(await crm.updateOrg({ organization_id: 9999, status: 2 })).toMatchObject({ ok: false, status: 404 });
+    expect((await crm.organizationDetails(id))!.status).toBe(1);
+  });
+});
+
 describe("listTeamMembers", () => {
   it("includes the Telegram username", async () => {
     await createFirstUser();
@@ -819,10 +971,9 @@ describe("listTeamMembers", () => {
 
   it("leaves out deactivated members", async () => {
     const adminId = await createFirstUser();
-    const added = await crm.addTeamMember({ telegram_id: "2001", name: "Bob", invited_by: adminId });
-    if (!added.ok) throw new Error(added.error);
+    const bobId = await addMember(adminId, "2001", "Bob");
     expect((await crm.listTeamMembers()).map(m => m.name)).toEqual(["Admin", "Bob"]);
-    await crm.newContact({ name: "Alice", type: "consumer", created_by: added.id });
+    await crm.newContact({ name: "Alice", type: "consumer", created_by: bobId });
     await crm.deleteTeamMember({ telegram_id: "2001", performed_by: adminId });
     expect((await crm.listTeamMembers()).map(m => m.name)).toEqual(["Admin"]);
   });
