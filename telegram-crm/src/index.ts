@@ -25,11 +25,19 @@ export default {
     if (!isFromTelegram(request, env)) {
       return new Response("Unauthorized", { status: 401 });
     }
-    const update = await request.json<TelegramUpdate>();
-    const chatId = chatIdOf(update);
-    if (!chatId) return new Response("Invalid input");
-    // Each chat has its own Durable Object holding its session (see chat.ts).
-    const { status, body } = await env.CHATS.getByName(String(chatId)).handleUpdate(update);
-    return new Response(body, { status });
+    // Any answer other than 2xx makes Telegram send the update again, and again;
+    // a failing update would then be handled over and over. So a request with the
+    // right secret always gets 200, and failures are logged instead.
+    try {
+      const update = await request.json<TelegramUpdate>();
+      const chatId = chatIdOf(update);
+      if (!chatId) return new Response("Invalid input");
+      // Each chat has its own Durable Object holding its sessions (see chat.ts).
+      const { status, body } = await env.CHATS.getByName(String(chatId)).handleUpdate(update);
+      return new Response(body, { status });
+    } catch (e) {
+      console.error("Webhook update failed", e);
+      return new Response("Error");
+    }
   }
 } satisfies ExportedHandler<Env>;

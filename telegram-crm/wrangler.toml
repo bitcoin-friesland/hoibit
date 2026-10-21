@@ -20,3 +20,7 @@ class_name = "ChatSession"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatSession"]
+
+# Workers Logs: keeps console.error output (failed Telegram calls, update errors).
+[observability]
+enabled = true
