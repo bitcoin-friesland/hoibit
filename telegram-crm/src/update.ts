@@ -7,6 +7,7 @@ import { handleEditFlow } from "./flows/edit";
 import { ensureCommandMenus, helpText, menuKeyboard } from "./helpers/menu";
 import { errorMessage, isErrorMessage } from "./helpers/messaging";
 import { parseRecordData, recordCard } from "./helpers/record";
+import { parseStatusData, setStatus, statusQuestion } from "./flows/status";
 import {
   botUsername,
   callTelegram,
@@ -456,6 +457,32 @@ async function handleButton(
       const card = await recordCard(env, shown);
       if (card) await sendMessage(env, chatId, card.text, card.options);
       else notice = { text: "This no longer exists." };
+      return reply("OK");
+    }
+    // 📊 Status: asks for the new status, then sets it (flows/status.ts).
+    const status = parseStatusData(data);
+    if (status) {
+      if (status.statusId === undefined) {
+        const question = await statusQuestion(env, status.organizationId);
+        if (question) await sendMessage(env, chatId, question.text, question.options);
+        else notice = { text: "This no longer exists." };
+        return reply("OK");
+      }
+      const answer = await setStatus(env, status.organizationId, status.statusId, member.id);
+      if (!answer) {
+        notice = { text: "Saving the status failed. Please try again.", alert: true };
+        return reply("OK");
+      }
+      const { message } = callback;
+      if (message.message_id !== undefined) {
+        await markAnswered(
+          env,
+          chatId,
+          { messageId: message.message_id, text: message.text, entities: message.entities },
+          answer
+        );
+      }
+      notice = { text: "Status saved." };
       return reply("OK");
     }
     const edited = parseRecordData(data, "edit");

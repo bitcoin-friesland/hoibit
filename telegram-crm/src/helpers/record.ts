@@ -1,9 +1,11 @@
 /**
  * The card of a saved contact or organization: its details, status and most recent conversations.
  * Its buttons belong to no session and work on old cards too, like log:<id>: show:c:<id> and
- * show:o:<id> open a card, edit:c:<id> and edit:o:<id> start editing one (flows/edit.ts).
+ * show:o:<id> open a card, edit:c:<id> and edit:o:<id> start editing one (flows/edit.ts), and
+ * status:<id> changes an organization's status (flows/status.ts).
  */
 import type { ConversationSummary } from "../../../crm-api/src/types";
+import { statusButton } from "../flows/status";
 import type { InlineKeyboardButton, SendOptions } from "../types";
 
 export interface RecordRef {
@@ -76,6 +78,7 @@ export async function recordCard(
   }
   const org = await env.crmApi.organizationDetails(ref.id);
   if (!org) return undefined;
+  buttons[0].push(statusButton(org.id));
   const lines = [`🏢 ${org.name}`, `🏷️ ${org.status_label ?? "No status"}`];
   if (org.communities.length > 0) lines.push(`👥 ${org.communities.join(", ")}`);
   if (org.website) lines.push(`🌐 ${org.website}`);

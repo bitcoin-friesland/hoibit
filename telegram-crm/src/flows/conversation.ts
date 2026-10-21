@@ -2,7 +2,8 @@ import { isValidNote } from "../helpers/validation";
 import { setStep } from "../helpers/session";
 import { errorMessage, successMessage } from "../helpers/messaging";
 import { handleContactFlow } from "./contact";
-import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
+import { statusButton } from "./status";
+import type { ChatId, FlowHandler, SendMessage, SendOptions, Session } from "../types";
 
 const CONTACT_MAX_RESULTS = 8;
 // Contacts the member added or talked to lately, offered when /logconversation starts.
@@ -39,6 +40,20 @@ async function askChannel(
   await sendMessage(env, chatId, `How did you talk to ${label}?`, {
     reply_markup: { inline_keyboard: channels.map(c => [{ text: c.label, callback_data: `channel:${c.id}` }]) }
   });
+}
+
+// After a conversation with an entrepreneur: a button to update their organization's status,
+// which such a conversation often changes. Nothing when it cannot be looked up.
+async function statusFollowUp(env: Env, contactId: number): Promise<SendOptions | undefined> {
+  try {
+    const contact = await env.crmApi.contactDetails(contactId, 0);
+    if (contact?.type !== "entrepreneur" || !contact.organization_id) return undefined;
+    const text = `📊 Update status of ${contact.organization_name}`;
+    return { reply_markup: { inline_keyboard: [[statusButton(contact.organization_id, text)]] } };
+  } catch (e) {
+    console.error("Loading a contact for the status button failed", e);
+    return undefined;
+  }
 }
 
 // Steps: search and pick a contact, pick a channel, write the note, save.
@@ -208,7 +223,8 @@ export const handleConversationFlow: FlowHandler = async (
       await sendMessage(
         env,
         chatId,
-        successMessage(`Conversation with ${session.contact_label} (${channelLabel}) logged.`)
+        successMessage(`Conversation with ${session.contact_label} (${channelLabel}) logged.`),
+        await statusFollowUp(env, session.contact_id ?? 0)
       );
       await removeSession();
       break;

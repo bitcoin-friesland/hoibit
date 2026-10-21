@@ -82,6 +82,7 @@ describe("/find", () => {
     );
     expect(lastButtons()).toEqual([
       { text: "✏️ Edit", callback_data: `edit:o:${orgId}` },
+      { text: "📊 Status", callback_data: `status:${orgId}` },
       { text: "👤 Anna", callback_data: `show:c:${annaId}` }
     ]);
     expect(sessionOf(ADMIN)).toBeUndefined();

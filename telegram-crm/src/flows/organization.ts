@@ -21,7 +21,7 @@ import { callTelegram } from "../helpers/telegram";
 import type { ChatId, InlineKeyboardButton, SendMessage, SendOptions, Session } from "../types";
 
 // The statuses as organization_statuses has them; the codes are the buttons' callback_data.
-const ORG_STATUSES: Record<string, { id: number; label: string }> = {
+export const ORG_STATUSES: Record<string, { id: number; label: string }> = {
   "btc-curious": { id: 1, label: "Curious about Bitcoin" },
   "accepts-bitcoin": { id: 2, label: "Accepts Bitcoin" },
   "not-interested": { id: 3, label: "Not Interested" },
