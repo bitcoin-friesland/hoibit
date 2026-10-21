@@ -5,6 +5,12 @@ import { callTelegram, spamKeyboard } from "./telegram";
 const BUTTON = /^spam:(\d+)(?::(yes|no))?$/;
 const STALE = "This button is no longer active.";
 
+// A notice the user must not miss: telegram-crm shows it in a box they close, not as a toast.
+interface Alert {
+  text: string;
+  alert: true;
+}
+
 const confirmKeyboard = (email: number) => ({
   inline_keyboard: [
     [{ text: "✅ Delete and block sender", callback_data: `spam:${email}:yes` }],
@@ -28,7 +34,7 @@ async function setKeyboard(env: Env, messageId: number, keyboard: object) {
  */
 export class SpamButtons extends WorkerEntrypoint<Env> {
   // Returns the notice Telegram shows on the button.
-  async press(data: string, chatId: number, messageId: number): Promise<string> {
+  async press(data: string, chatId: number, messageId: number): Promise<string | Alert> {
     const match = BUTTON.exec(data);
     if (!match || String(chatId) !== String(this.env.TELEGRAM_CHAT_ID)) return STALE;
     const id = Number(match[1]);
@@ -60,7 +66,7 @@ export class SpamButtons extends WorkerEntrypoint<Env> {
       console.error("Could not delete the messages of a spam email:", err);
       await setKeyboard(this.env, messageId, { inline_keyboard: [] }).catch(() => {});
       await list.forget(id);
-      return `${blocked} Telegram did not let the bot delete the email; delete it by hand.`;
+      return { text: `${blocked} Telegram did not let the bot delete the email; delete it by hand.`, alert: true };
     }
     await list.forget(id);
     console.log(`Marked email ${id} as spam${email.sender ? ` and blocked ${email.sender}` : ""}`);

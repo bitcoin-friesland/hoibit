@@ -675,9 +675,10 @@ describe("spam", () => {
     const data = spamData(sent[0]);
     const id = nextMessageId - 1;
     stubTelegram(() => Response.json({ ok: false, description: "Bad Request: message can't be deleted" }));
-    expect(await buttons().press(`${data}:yes`, -100123, id)).toBe(
-      "Emails from aushan@example.net are now blocked. Telegram did not let the bot delete the email; delete it by hand."
-    );
+    expect(await buttons().press(`${data}:yes`, -100123, id)).toEqual({
+      text: "Emails from aushan@example.net are now blocked. Telegram did not let the bot delete the email; delete it by hand.",
+      alert: true
+    });
     stubTelegram();
     await worker.email(pitch(), env);
     expect(calls).toBe(0);
