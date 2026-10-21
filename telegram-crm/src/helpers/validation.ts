@@ -7,6 +7,12 @@ export function isValidName(name: string | undefined): name is string {
   return /^[\p{L}\p{M}\s'’.-]+$/u.test(trimmed) && (trimmed.match(/\p{L}/gu) ?? []).length >= 3;
 }
 
+// Any name with at least one letter, in any script, with common punctuation ("’t Hoekje",
+// "Café (Leeuwarden)"). The letter keeps out phone numbers, "@" keeps out email addresses.
+export function isValidOrganizationName(name: string | undefined): name is string {
+  return !!name && /\p{L}/u.test(name) && !name.includes("@") && !/\p{Cc}/u.test(name);
+}
+
 export function isValidEmail(email: string | undefined): email is string {
   return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }

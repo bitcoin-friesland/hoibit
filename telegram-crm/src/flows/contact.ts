@@ -1,47 +1,17 @@
-import { isValidName, isValidEmail, isValidPhone, isValidNpub, isValidWebsite } from "../helpers/validation";
+import { isValidName, isValidEmail, isValidPhone, isValidNpub, isValidOrganizationName } from "../helpers/validation";
 import { setStep } from "../helpers/session";
-import { errorMessage, successMessage, promptWithSkip, promptWithOptions, escapeHtml } from "../helpers/messaging";
+import { errorMessage, successMessage, promptWithSkip, promptWithOptions } from "../helpers/messaging";
 import {
-  startCommunityPicker,
-  renderCommunityPicker,
-  handleCommunityPickerInput,
-  pickedCommunities
-} from "../helpers/community";
-import { findOsmNodeForOrganization, type OsmResult } from "../helpers/osm";
+  ORG_MAX_RESULTS,
+  INVALID_ORGANIZATION_NAME,
+  contactInput,
+  errorText,
+  handleOrganizationStep,
+  startOrganizationSteps
+} from "./organization";
 import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
 
-const ORG_STATUS_CODE_TO_ID: Record<string, number> = {
-  "btc-curious": 1,
-  "accepts-bitcoin": 2,
-  "not-interested": 3,
-  "stopped-accepting": 4
-};
-
-const ORG_STATUS_OPTIONS = [
-  { label: "BTC-curious", value: "btc-curious" },
-  { label: "Accepts Bitcoin", value: "accepts-bitcoin" },
-  { label: "Not interested", value: "not-interested" },
-  { label: "Stopped accepting", value: "stopped-accepting" }
-];
-
-const ORG_PICKER_TITLE = "Select Bitcoin communities for this organization:";
-
-const OSM_TYPE_KEYS = "shop amenity office craft industrial tourism leisure healthcare religion farm landuse".split(
-  " "
-);
-const OSM_MAX_RESULTS = 8;
-// Room for the OpenStreetMap details within Telegram's 4096-character message limit.
-const OSM_DETAILS_MAX_LENGTH = 3500;
-const ORG_MAX_RESULTS = 5;
-
-const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
-// Any name with at least one letter, in any script, with common punctuation ("’t Hoekje",
-// "Café (Leeuwarden)"). The letter keeps out phone numbers, "@" keeps out email addresses.
-function isValidOrganizationName(name: string | undefined): name is string {
-  return !!name && /\p{L}/u.test(name) && !name.includes("@") && !/\p{Cc}/u.test(name);
-}
-
+// Saves the contact, with no organization or an existing one.
 async function addContact(
   sendMessage: SendMessage,
   env: Env,
@@ -52,16 +22,7 @@ async function addContact(
   doneText: string
 ) {
   try {
-    // created_by is the team member id (team_members.id) of the user, not the Telegram user id.
-    const res = await env.crmApi.newContact({
-      name: session.name ?? "",
-      type: session.type ?? "",
-      organization_id: organizationId,
-      email: session.email || null,
-      phone: session.phone || null,
-      nostr_npub: session.nostr_npub || null,
-      created_by: session.created_by || null
-    });
+    const res = await env.crmApi.newContact({ ...contactInput(session), organization_id: organizationId });
     if (!res.ok) {
       await sendMessage(env, chatId, errorMessage(`Failed to add contact (code ${res.status}).`));
       await removeSession();
@@ -74,148 +35,6 @@ async function addContact(
   }
   await sendMessage(env, chatId, successMessage(doneText));
   await removeSession();
-}
-
-async function addOrganizationAndContact(
-  sendMessage: SendMessage,
-  env: Env,
-  chatId: ChatId,
-  session: Session,
-  removeSession: () => Promise<void>,
-  osmId: string | null
-) {
-  const statusId = session.organization_status && ORG_STATUS_CODE_TO_ID[session.organization_status];
-  if (!statusId) {
-    await sendMessage(
-      env,
-      chatId,
-      errorMessage("Organization status is missing or invalid. Please start again with /newcontact.")
-    );
-    await removeSession();
-    return;
-  }
-  const communities = session.organization_communities || [];
-  let orgId: number;
-  try {
-    const res = await env.crmApi.newOrg({
-      name: session.organization ?? "",
-      status: statusId,
-      location_osm_id: osmId,
-      website: session.organization_website || null,
-      nostr_npub: session.organization_nostr_npub || null,
-      community_ids: communities.map(c => c.id),
-      created_by: session.created_by || null
-    });
-    if (!res.ok) {
-      await sendMessage(
-        env,
-        chatId,
-        errorMessage(`Failed to add organization (code ${res.status}). Contact not added.`)
-      );
-      await removeSession();
-      return;
-    }
-    orgId = res.id;
-  } catch (e) {
-    await sendMessage(env, chatId, errorMessage(`Error adding organization: ${errorText(e)}`));
-    await removeSession();
-    return;
-  }
-  const details = [
-    communities.length > 0 ? `communities: ${communities.map(c => c.name).join(", ")}` : null,
-    osmId ? `OpenStreetMap: ${osmId}` : null
-  ].filter(Boolean);
-  await addContact(
-    sendMessage,
-    env,
-    chatId,
-    session,
-    removeSession,
-    orgId,
-    `Organization "${session.organization}" and contact "${session.name}" added.${details.length ? ` (${details.join("; ")})` : ""}`
-  );
-}
-
-function formatOsmItem(item: OsmResult) {
-  const lines = [`<b># ${escapeHtml(item.osm_id)}</b>`, `<b>Name:</b> ${escapeHtml(item.name || "(no name)")}`];
-  if (item.class && item.type) {
-    lines.push(`<b>OSM type:</b> ${escapeHtml(item.class)} = ${escapeHtml(item.type)}`);
-  }
-  if (item.tags) {
-    for (const key of OSM_TYPE_KEYS) {
-      if (item.tags[key]) lines.push(`<b>Tag:</b> ${escapeHtml(key)} = ${escapeHtml(item.tags[key])}`);
-    }
-  }
-  const address = item.address;
-  const addressLine = [
-    address.street,
-    address.housenumber,
-    address.postcode,
-    address.city,
-    address.region,
-    address.country
-  ]
-    .filter(Boolean)
-    .join(", ");
-  if (addressLine) lines.push(`<b>Address:</b> ${escapeHtml(addressLine)}`);
-  if (item.phone) lines.push(`<b>Phone:</b> ${escapeHtml(item.phone)}`);
-  if (item.email) lines.push(`<b>Email:</b> ${escapeHtml(item.email)}`);
-  if (item.website) lines.push(`<b>Website:</b> ${escapeHtml(item.website)}`);
-  return lines.join("\n");
-}
-
-// Searches OpenStreetMap for the organization (per region of the selected communities) and either
-// asks the user to pick a location or saves the organization and contact right away.
-async function lookupOsmAndContinue(
-  sendMessage: SendMessage,
-  env: Env,
-  chatId: ChatId,
-  session: Session,
-  persistSession: () => Promise<void>,
-  removeSession: () => Promise<void>
-) {
-  const regions = (session.organization_communities || []).map(c => c.region).filter((r): r is string => !!r);
-  await sendMessage(env, chatId, "Searching for OpenStreetMap locations... ⏳");
-  let osmResults: OsmResult[] = [];
-  try {
-    // One lookup for all regions: it deduplicates the results and spaces the Nominatim requests.
-    osmResults = await findOsmNodeForOrganization({
-      name: session.organization ?? "",
-      regions,
-      phone: session.phone,
-      website: session.organization_website,
-      email: session.email
-    });
-  } catch {
-    osmResults = [];
-  }
-  osmResults = osmResults.filter(item => item && item.id).slice(0, OSM_MAX_RESULTS);
-  if (osmResults.length === 0) {
-    await addOrganizationAndContact(sendMessage, env, chatId, session, removeSession, null);
-    return;
-  }
-  // Whole items only: a cut inside an HTML tag makes Telegram refuse the entire message.
-  const items: string[] = [];
-  let length = 0;
-  for (const item of osmResults) {
-    const formatted = formatOsmItem(item);
-    const added = (items.length > 0 ? 2 : 0) + formatted.length;
-    if (items.length > 0 && length + added > OSM_DETAILS_MAX_LENGTH) break;
-    items.push(formatted);
-    length += added;
-  }
-  const more = items.length < osmResults.length ? `\n\nShowing ${items.length} of ${osmResults.length} locations.` : "";
-  osmResults = osmResults.slice(0, items.length);
-  session.osm_options = osmResults.map(item => String(item.id));
-  setStep(session, "awaiting_osm_node");
-  await persistSession();
-  const details = items.join("\n\n") + more;
-  const keyboard = osmResults.map(item => [{ text: `# ${item.osm_id}`, callback_data: `osmnode:${item.id}` }]);
-  keyboard.push([{ text: "None of the above", callback_data: "osmnode:none" }]);
-  await sendMessage(env, chatId, `Select the correct OpenStreetMap location for this organization:\n\n${details}`, {
-    reply_markup: { inline_keyboard: keyboard },
-    parse_mode: "HTML"
-  });
 }
 
 export const handleContactFlow: FlowHandler = async (
@@ -354,25 +173,12 @@ export const handleContactFlow: FlowHandler = async (
           await sendMessage(env, chatId, errorMessage("Please type the name of the organization."));
           return;
         }
-        session.organization = session.pending_org;
-        setStep(session, "awaiting_org_status");
-        await persistSession();
-        const prompt = promptWithOptions(
-          "What is the Bitcoin adoption status of the organization?",
-          ORG_STATUS_OPTIONS
-        );
-        await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
+        await startOrganizationSteps(sendMessage, env, chatId, session, persistSession, session.pending_org);
         return;
       }
       const org = text && text.trim();
       if (!isValidOrganizationName(org)) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage(
-            "Please enter a valid organization name (organization names should be words, not a phone number or symbols)."
-          )
-        );
+        await sendMessage(env, chatId, errorMessage(INVALID_ORGANIZATION_NAME));
         return;
       }
       try {
@@ -407,107 +213,11 @@ export const handleContactFlow: FlowHandler = async (
       }
       break;
     }
-    case "awaiting_org_status": {
-      const status = text || session.last_callback_data;
-      if (!status || !ORG_STATUS_CODE_TO_ID[status]) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please select a valid Bitcoin adoption status for the organization.")
-        );
-        return;
-      }
-      session.organization_status = status;
-      setStep(session, "awaiting_org_website");
-      await persistSession();
-      const prompt = promptWithSkip("What is the website of the organization? (optional)");
-      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
-      break;
-    }
-    case "awaiting_org_website": {
-      let website = text && text.trim();
-      if (text === undefined || session.last_callback_data === "skip" || website?.toLowerCase() === "skip") {
-        website = undefined;
-      } else if (website && !isValidWebsite(website)) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please enter a valid website (for example example.com) or tap Skip.")
-        );
-        return;
-      }
-      session.organization_website = website || null;
-      setStep(session, "awaiting_org_nostr");
-      await persistSession();
-      const prompt = promptWithSkip("What is the nostr npub of the organization? (optional)");
-      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
-      break;
-    }
-    case "awaiting_org_nostr": {
-      let nostr = text && text.trim();
-      if (text === undefined || session.last_callback_data === "skip" || nostr?.toLowerCase() === "skip") {
-        nostr = undefined;
-      } else if (nostr && !isValidNpub(nostr)) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid nostr npub (npub1…) or tap Skip."));
-        return;
-      }
-      session.organization_nostr_npub = nostr || null;
-      session.org_picker = await startCommunityPicker(env, session.telegram_id);
-      setStep(session, "awaiting_communities");
-      await persistSession();
-      await sendMessage(env, chatId, ...renderCommunityPicker(session.org_picker, ORG_PICKER_TITLE));
-      break;
-    }
-    case "awaiting_communities": {
-      const picker = session.org_picker;
-      if (!picker) {
-        await sendMessage(env, chatId, errorMessage("Session expired. Please start again with /newcontact."));
-        await removeSession();
-        return;
-      }
-      const cb = session.last_callback_data;
-      session.last_callback_data = null;
-      const result = await handleCommunityPickerInput(env, picker, cb);
-      await persistSession();
-      if (result === "updated") {
-        await sendMessage(env, chatId, ...renderCommunityPicker(picker, ORG_PICKER_TITLE));
-      } else if (result === "done" || result === "skip") {
-        session.organization_communities = result === "skip" ? [] : pickedCommunities(picker);
-        await persistSession();
-        await lookupOsmAndContinue(sendMessage, env, chatId, session, persistSession, removeSession);
-      } else if (typeof result === "object") {
-        await sendMessage(env, chatId, errorMessage(result.error));
-      } else {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please use the buttons to select communities, then press Done or Skip.")
-        );
-      }
-      break;
-    }
-    case "awaiting_osm_node": {
-      const cb = session.last_callback_data;
-      const choice = cb && cb.startsWith("osmnode:") ? cb.slice("osmnode:".length) : null;
-      if (!choice || (choice !== "none" && !(session.osm_options || []).includes(choice))) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please select a valid OpenStreetMap location or 'None of the above'.")
-        );
-        return;
-      }
-      await addOrganizationAndContact(
-        sendMessage,
-        env,
-        chatId,
-        session,
-        removeSession,
-        choice === "none" ? null : choice
-      );
-      break;
-    }
     default:
+      // The steps of a new organization (status, website, npub, communities, OpenStreetMap).
+      if (await handleOrganizationStep(sendMessage, env, chatId, text, session, persistSession, removeSession)) {
+        break;
+      }
       await sendMessage(env, chatId, errorMessage("Unknown step in contact flow. Type /cancel to start over."));
       await removeSession();
       break;
