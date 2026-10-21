@@ -275,7 +275,7 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
       case "start":
       case "help": {
         const adminCommands = isAdmin
-          ? `\n/teammember - Manage team members (invite, admin rights)\n/invite - Invite a new team member`
+          ? `\n/teammember - Manage team members (invite, edit, remove, admin rights)\n/invite - Invite a new team member`
           : "";
         await sendMessage(
           env,

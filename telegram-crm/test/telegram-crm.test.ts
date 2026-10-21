@@ -239,7 +239,7 @@ describe("/invite", () => {
     await chat.press(keyboard[0][0].callback_data);
     await chat.press("done");
     await chat.text("confirm");
-    expect(lastText()).toBe('✅ Invitation sent to "Erin" (Telegram ID: 7001).');
+    expect(lastText()).toBe('✅ "Erin" added as team member. Ask them to open the bot and send /help.');
     const member = await env.DB.prepare(
       `SELECT m.telegram_id, m.time_zone, COUNT(c.community_id) AS communities
        FROM team_members m LEFT JOIN team_member_communities c ON c.team_member_id = m.id
