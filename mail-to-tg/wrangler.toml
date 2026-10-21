@@ -8,3 +8,7 @@ preview_urls = true
 
 [vars]
 TELEGRAM_CHAT_ID = "-1002557433889"
+
+# Keep logs in Workers Logs (free: 200k events a day, 3 days retention).
+[observability]
+enabled = true
