@@ -693,6 +693,27 @@ describe("spam", () => {
     expect(other.at(-1)?.body.reply_markup).toEqual(sent[0].reply_markup);
   });
 
+  it("lists blocked senders, the most recent first, and unblocks them by id", async () => {
+    await worker.email(pitch(), env);
+    await buttons().press(`${spamData(sent[0])}:yes`, -100123, nextMessageId - 1);
+    await runInDurableObject(blocklist(), async (_instance, state) => {
+      state.storage.sql.exec("INSERT INTO blocked (address, since) VALUES ('old@example.org', 1)");
+    });
+    const list = await buttons().blocked();
+    expect(list).toEqual([
+      { id: expect.any(Number), address: "aushan@example.net", since: expect.any(Number) },
+      { id: expect.any(Number), address: "old@example.org", since: 1 }
+    ]);
+    expect(await buttons().unblock(list[0].id)).toBe("aushan@example.net");
+    expect(await buttons().unblock(list[0].id)).toBeUndefined();
+    expect((await buttons().blocked()).map(b => b.address)).toEqual(["old@example.org"]);
+
+    // Their emails come through again.
+    stubTelegram();
+    await worker.email(pitch(), env);
+    expect(sent).toHaveLength(1);
+  });
+
   it("leaves out the contact button while the bot's username is unknown", async () => {
     knowsUsername = false;
     await worker.email(pitch(), env);

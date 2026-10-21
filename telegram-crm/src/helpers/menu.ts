@@ -20,7 +20,8 @@ const MEMBER_COMMANDS: BotCommand[] = [
 ];
 const ADMIN_COMMANDS: BotCommand[] = [
   { command: "invite", description: "Make an invite link for a new team member" },
-  { command: "teammember", description: "Manage team members" }
+  { command: "teammember", description: "Manage team members" },
+  { command: "blocked", description: "Show and unblock blocked email senders" }
 ];
 
 const commandsOf = (isAdmin: boolean) => (isAdmin ? [...MEMBER_COMMANDS, ...ADMIN_COMMANDS] : MEMBER_COMMANDS);
@@ -40,7 +41,14 @@ export function menuKeyboard(isAdmin: boolean): { inline_keyboard: InlineKeyboar
         { text: "🏢 New organization", callback_data: "menu:neworg" }
       ],
       [{ text: "💬 Log conversation", callback_data: "menu:logconversation" }],
-      ...(isAdmin ? [[{ text: "👥 Team", callback_data: "menu:teammember" }]] : [])
+      ...(isAdmin
+        ? [
+            [
+              { text: "👥 Team", callback_data: "menu:teammember" },
+              { text: "🚫 Blocked senders", callback_data: "menu:blocked" }
+            ]
+          ]
+        : [])
     ]
   };
 }
