@@ -1,5 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { blocklist } from "./blocklist";
+import { blocklist, type BlockedSender } from "./blocklist";
 import { callTelegram, emailKeyboard } from "./telegram";
 
 const BUTTON = /^spam:(\d+)(?::(yes|no))?$/;
@@ -27,12 +27,26 @@ async function setKeyboard(env: Env, messageId: number, keyboard: object) {
 }
 
 /**
- * The spam button under every email. Telegram sends a press to the bot's webhook, telegram-crm,
- * which checks that a team member pressed it and passes it on here over its mailToTg service
- * binding. A press first asks for confirmation; "yes" blocks the sender and deletes the email's
- * messages. Later emails from a blocked sender are dropped (see index.ts).
+ * What telegram-crm asks of mail-to-tg over its mailToTg service binding: the buttons under every
+ * email and the list of blocked senders. Telegram sends a press of the spam button to the bot's
+ * webhook, telegram-crm, which checks that a team member pressed it and passes it on here. A
+ * press first asks for confirmation; "yes" blocks the sender and deletes the email's messages.
+ * Later emails from a blocked sender are dropped (see index.ts) until an admin unblocks them.
  */
 export class SpamButtons extends WorkerEntrypoint<Env> {
+  // The blocked senders, the most recently blocked first; telegram-crm lets only admins see them.
+  async blocked(): Promise<BlockedSender[]> {
+    return blocklist(this.env).listBlocked();
+  }
+
+  // Lets the sender's emails through again; returns their address, or undefined when the id is
+  // not blocked (anymore). telegram-crm lets only admins do this.
+  async unblock(id: number): Promise<string | undefined> {
+    const address = await blocklist(this.env).unblock(id);
+    if (address) console.log(`Unblocked ${address}`);
+    return address;
+  }
+
   // The sender of a recent email, for the ➕ Contact button; undefined when it is unknown.
   async sender(email: number): Promise<{ address: string; name: string } | undefined> {
     const record = await blocklist(this.env).find(email);

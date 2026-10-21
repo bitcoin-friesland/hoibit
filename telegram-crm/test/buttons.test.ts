@@ -142,7 +142,8 @@ describe("main menu", () => {
       "🏢 New organization",
       "💬 Log conversation",
       "🔎 Find",
-      "👥 Team"
+      "👥 Team",
+      "🚫 Blocked senders"
     ]);
     await chat.press("menu:newcontact");
     expect(lastText()).toBe("What is the contact name?");
@@ -205,7 +206,7 @@ describe("command menu", () => {
     expect(menus).toEqual([
       { scope: { type: "default" }, commands: ["help"] },
       { scope: { type: "all_group_chats" }, commands: member },
-      { scope: { type: "chat", chat_id: ADMIN }, commands: [...member, "invite", "teammember"] },
+      { scope: { type: "chat", chat_id: ADMIN }, commands: [...member, "invite", "teammember", "blocked"] },
       { scope: { type: "chat", chat_id: MEMBER }, commands: member }
     ]);
   });
@@ -217,6 +218,6 @@ describe("command menu", () => {
     await env.DB.prepare("UPDATE team_members SET is_admin = 1 WHERE id = ?").bind(memberId).run();
     await chatAs(MEMBER).text("/help");
     const scopes = telegramCalls("setMyCommands").filter(c => (c.body.scope as { type: string }).type === "chat");
-    expect(scopes.map(c => (c.body.commands as unknown[]).length)).toEqual([6, 8]);
+    expect(scopes.map(c => (c.body.commands as unknown[]).length)).toEqual([6, 9]);
   });
 });

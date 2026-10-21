@@ -25,8 +25,21 @@ const mailToTg = {
     spamPresses.push({ data, chatId, messageId });
     return spamAnswer();
   },
-  sender: async (email: number) => emailSenders.get(email)
+  sender: async (email: number) => emailSenders.get(email),
+  blocked: async () => [...blockedSenders.values()].sort((a, b) => b.since - a.since),
+  unblock: async (id: number) => {
+    const address = blockedSenders.get(id)?.address;
+    blockedSenders.delete(id);
+    return address;
+  }
 };
+// The senders mail-to-tg has blocked, by id.
+let blockedSenders = new Map<number, { id: number; address: string; since: number }>();
+
+// Lets mail-to-tg list address as blocked since since, until the next reset.
+export function blockSender(id: number, address: string, since: number) {
+  blockedSenders.set(id, { id, address, since });
+}
 export const workerEnv = {
   TELEGRAM_TOKEN: "test-token",
   TELEGRAM_WEBHOOK_SECRET: SECRET,
@@ -129,6 +142,7 @@ export async function resetAndStubFetch({ nominatim = [] as object[] } = {}): Pr
   lastDelivered = undefined;
   spamPresses = [];
   emailSenders = new Map();
+  blockedSenders = new Map();
   spamAnswer = async () => "Delete this email and block its sender?";
 
   const sent: SentMessage[] = [];

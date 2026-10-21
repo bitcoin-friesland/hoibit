@@ -12,6 +12,13 @@ export interface EmailRecord {
   messages: number[];
 }
 
+export type BlockedSender = {
+  id: number;
+  address: string;
+  // When it was blocked, in milliseconds since 1970.
+  since: number;
+};
+
 /**
  * The senders marked as spam, and for each recent email the sender and the Telegram messages
  * that carry it, so a spam button can block the one and delete the others. There is one
@@ -54,6 +61,21 @@ export class Blocklist extends DurableObject<Env> {
 
   block(address: string) {
     this.ctx.storage.sql.exec("INSERT OR IGNORE INTO blocked (address, since) VALUES (?, ?)", address, Date.now());
+  }
+
+  // The blocked senders, the most recently blocked first. id is the row's rowid, short enough for
+  // the callback_data of an Unblock button, which an address may not be.
+  listBlocked() {
+    return this.ctx.storage.sql
+      .exec<BlockedSender>("SELECT rowid AS id, address, since FROM blocked ORDER BY since DESC, rowid DESC")
+      .toArray();
+  }
+
+  // Unblocks the sender with that id; returns their address, or undefined when it was not blocked.
+  unblock(id: number) {
+    return this.ctx.storage.sql
+      .exec<{ address: string }>("DELETE FROM blocked WHERE rowid = ? RETURNING address", id)
+      .toArray()[0]?.address;
   }
 
   // Starts remembering an email; returns its id. Forgets emails older than KEEP_EMAILS_MS.

@@ -5,6 +5,7 @@ import { handleTeamMemberFlow } from "./flows/teammember";
 import { handleFindFlow } from "./flows/find";
 import { handleEditFlow } from "./flows/edit";
 import { ensureCommandMenus, helpText, menuKeyboard } from "./helpers/menu";
+import { blockedList, parseUnblockData, type BlockedSender } from "./helpers/blocked";
 import { errorMessage, isErrorMessage } from "./helpers/messaging";
 import { parseRecordData, recordCard } from "./helpers/record";
 import { parseStatusData, setStatus, statusQuestion } from "./flows/status";
@@ -47,6 +48,7 @@ const STALE_BUTTON = "This button is no longer active.";
 const EXPIRED_BUTTON = "This button has expired. Start again with /help.";
 const NOT_AUTHORIZED_BUTTON = "You are not authorized to use this bot.";
 const ONLY_ADMINS = "Only admins can manage team members.";
+const ONLY_ADMINS_BLOCKED = "Only admins can see and unblock blocked email senders.";
 const NOT_ON_TEAM = "You're not on the team yet. To join, ask an admin for an invite link.";
 const INVALID_INVITE =
   "This invite link is no longer valid: it was used already or it expired. Ask an admin for a new one.";
@@ -60,11 +62,16 @@ interface Notice {
 // mail-to-tg's SpamButtons entrypoint (mail-to-tg/src/buttons.ts). Its types are not imported:
 // they would type-check mail-to-tg's code against this Worker's Env. press answers with the
 // notice text, or with a Notice for one the user must not miss; sender gives the sender of a
-// recent email, for its ➕ Contact button.
+// recent email, for its ➕ Contact button; blocked and unblock list and unblock the senders that
+// the spam button blocked (for admins only).
 interface SpamButtons {
   press(data: string, chatId: number, messageId: number): Promise<string | Notice>;
   sender(email: number): Promise<{ address: string; name: string } | undefined>;
+  blocked(): Promise<BlockedSender[]>;
+  unblock(id: number): Promise<string | undefined>;
 }
+
+const mailButtons = (env: Env) => env.mailToTg as unknown as SpamButtons;
 
 // The command that starts each flow, to name a flow that was stopped.
 const FLOW_COMMANDS: Record<NonNullable<Session["mode"]>, string> = {
@@ -185,10 +192,12 @@ function asQuestion(
  * Starts /newcontact with the sender's address and name; without a sender, a plain /newcontact.
  */
 async function startContactFromEmail(env: Env, store: SessionStore, actor: Actor, email: number) {
-  const sender = await (env.mailToTg as unknown as SpamButtons).sender(email).catch((e: unknown) => {
-    console.error("Looking up the sender of an email failed", e);
-    return undefined;
-  });
+  const sender = await mailButtons(env)
+    .sender(email)
+    .catch((e: unknown) => {
+      console.error("Looking up the sender of an email failed", e);
+      return undefined;
+    });
   if (!sender) {
     await sendMessage(env, actor.chatId, "ℹ️ The sender of that email is no longer known.");
     await startCommandFlow(env, store, actor, "newcontact");
@@ -410,6 +419,23 @@ async function startCommandFlow(env: Env, store: SessionStore, actor: Actor, com
       // The first step searches for the name typed after /find, or asks for one.
       await startFlow(env, store, actor, { step: "find_start", mode: "find", query: args, ...owner });
       return true;
+    case "blocked": {
+      if (actor.member.is_admin !== 1) {
+        await sendMessage(env, actor.chatId, ONLY_ADMINS_BLOCKED);
+        return true;
+      }
+      let senders;
+      try {
+        senders = await mailButtons(env).blocked();
+      } catch (e) {
+        console.error("Loading the blocked senders failed", e);
+        await sendMessage(env, actor.chatId, errorMessage("Loading the blocked senders failed. Please try again."));
+        return true;
+      }
+      const list = blockedList(senders);
+      await sendMessage(env, actor.chatId, list.text, senders.length > 0 ? list.options : {});
+      return true;
+    }
     case "invite":
     case "teammember":
       if (actor.member.is_admin !== 1) {
@@ -450,7 +476,7 @@ async function handleButton(
     const data = callback.data ?? "";
     // The spam button under an email that mail-to-tg posted; it belongs to no session.
     if (data.startsWith("spam:")) {
-      const answer = await (env.mailToTg as unknown as SpamButtons)
+      const answer = await mailButtons(env)
         .press(data, chatId, callback.message.message_id ?? 0)
         .catch((e: unknown): Notice => {
           console.error("Spam button failed", e);
@@ -460,6 +486,21 @@ async function handleButton(
       return reply("OK");
     }
     const actor = { chatId, userId, member };
+    // ✅ Unblock under /blocked: unblocks the sender and redraws the list in place.
+    const unblockId = parseUnblockData(data);
+    if (unblockId !== undefined) {
+      if (member.is_admin !== 1) {
+        notice = { text: ONLY_ADMINS_BLOCKED };
+        return reply("Forbidden");
+      }
+      const address = await mailButtons(env).unblock(unblockId);
+      notice = { text: address ? `${address} is no longer blocked.` : "That sender was already unblocked." };
+      const list = blockedList(await mailButtons(env).blocked());
+      if (callback.message.message_id !== undefined) {
+        await editMessage(env, chatId, callback.message.message_id, list.text, list.options);
+      }
+      return reply("OK");
+    }
     // Main menu buttons work like the command, also on an old menu.
     if (data.startsWith("menu:")) {
       if (!(await startCommandFlow(env, store, actor, data.slice("menu:".length)))) notice = { text: STALE_BUTTON };
