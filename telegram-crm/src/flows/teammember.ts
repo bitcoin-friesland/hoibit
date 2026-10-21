@@ -6,6 +6,7 @@ import {
   startCommunityPicker,
   renderCommunityPicker,
   handleCommunityPickerInput,
+  pickedAnswer,
   pickedCommunities
 } from "../helpers/community";
 import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
@@ -263,8 +264,9 @@ export const handleTeamMemberFlow: FlowHandler = async (
       const result = await handleCommunityPickerInput(env, picker, cb);
       await persistSession();
       if (result === "updated") {
-        await sendMessage(env, chatId, ...renderCommunityPicker(picker, INVITE_PICKER_TITLE));
+        await sendMessage(env, chatId, ...renderCommunityPicker(picker, INVITE_PICKER_TITLE, { replace: true }));
       } else if (result === "done" || result === "skip") {
+        if (result === "done") session.pressed_answer = pickedAnswer(picker);
         await sendInviteLink(sendMessage, env, chatId, session, result === "skip" ? [] : pickedCommunities(picker));
         await removeSession();
       } else if (typeof result === "object") {
@@ -352,7 +354,7 @@ export const handleTeamMemberFlow: FlowHandler = async (
       const choice = session.last_callback_data;
       const label = session.member_label;
       if (choice === "cancel_remove") {
-        await sendMessage(env, chatId, errorMessage("Removal cancelled."));
+        await sendMessage(env, chatId, "Removal cancelled.");
         await removeSession();
         return;
       }
@@ -447,11 +449,12 @@ export const handleTeamMemberFlow: FlowHandler = async (
       const result = await handleCommunityPickerInput(env, picker, cb);
       await persistSession();
       if (result === "updated") {
-        await sendMessage(env, chatId, ...renderCommunityPicker(picker, editPickerTitle(label)));
+        await sendMessage(env, chatId, ...renderCommunityPicker(picker, editPickerTitle(label), { replace: true }));
       } else if (result === "skip") {
         await sendMessage(env, chatId, `Communities of ${label} unchanged.`);
         await removeSession();
       } else if (result === "done") {
+        session.pressed_answer = pickedAnswer(picker);
         const communities = pickedCommunities(picker);
         await saveMemberChanges(
           sendMessage,

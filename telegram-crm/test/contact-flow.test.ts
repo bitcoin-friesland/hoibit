@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleContactFlow } from "../src/flows/contact";
 import { findOsmNodeForOrganization } from "../src/helpers/osm";
 import type { ChatId, SendMessage } from "../src/types";
-import { addAdmin, chatAs, resetAndStubFetch, sessionOf, type SentMessage } from "./harness";
+import { addAdmin, chatAs, lastKeyboardMessage, resetAndStubFetch, sessionOf, type SentMessage } from "./harness";
 
 const ADMIN = 5001;
 let sent: SentMessage[];
@@ -60,9 +60,9 @@ describe("audit repro: contact flow", () => {
     await toCommunityPicker(chat, "Erin");
     await chat.press("choose_other");
     await chat.press("country:0");
-    const keyboard = JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard;
-    await chat.press(keyboard[0][0].callback_data); // e.g. Amsterdam
-    await chat.press(keyboard[1][0].callback_data); // e.g. Arnhem
+    const keyboard = lastKeyboardMessage(ADMIN)!.reply_markup!.inline_keyboard;
+    await chat.press(keyboard[0][0].callback_data!); // e.g. Amsterdam
+    await chat.press(keyboard[1][0].callback_data!); // e.g. Arnhem
     await chat.press("done");
     const osm = sent.find(m => m.parse_mode === "HTML");
     const data: string[] = JSON.parse(osm!.reply_markup!)
@@ -207,7 +207,8 @@ describe("contact flow input checks", () => {
     await chat.press("skip");
     const osm = sent.find(m => m.parse_mode === "HTML")!;
     const shown = osm.text.split("<b># ").length - 1;
-    const buttons = JSON.parse(osm.reply_markup!).inline_keyboard.length - 1;
+    // Without "None of the above" and Cancel.
+    const buttons = JSON.parse(osm.reply_markup!).inline_keyboard.length - 2;
     expect({ shown, buttons, note: osm.text.includes(`Showing ${shown} of 8 locations.`) }).toEqual({
       shown: 7,
       buttons: 7,

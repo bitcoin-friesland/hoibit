@@ -1,4 +1,7 @@
-import type { ChatId, SendOptions } from "../types";
+import type { ChatId, InlineKeyboardButton, SendOptions } from "../types";
+
+// Telegram's limit for the text of one message.
+const MAX_MESSAGE_LENGTH = 4096;
 
 interface TelegramResponse<T> {
   ok: boolean;
@@ -47,7 +50,7 @@ export interface ApiSendOptions extends Omit<SendOptions, "reply_markup"> {
 
 // Sends a message; returns its message_id, or undefined when Telegram did not send it.
 export async function sendMessage(env: Env, chatId: ChatId, text: string, options: ApiSendOptions = {}) {
-  const { reply_markup, accepts_text: _, ...rest } = options;
+  const { reply_markup, accepts_text: _, replace: __, ...rest } = options;
   const message = await callTelegram<{ message_id: number }>(env, "sendMessage", {
     chat_id: chatId,
     text,
@@ -55,6 +58,64 @@ export async function sendMessage(env: Env, chatId: ChatId, text: string, option
     ...(reply_markup ? { reply_markup: JSON.stringify(reply_markup) } : {})
   });
   return message?.message_id;
+}
+
+// Gives a message new text and buttons; false when Telegram refused, e.g. for a message too old to edit.
+export async function editMessage(env: Env, chatId: ChatId, messageId: number, text: string, options: SendOptions) {
+  const edited = await callTelegram(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    ...(options.parse_mode ? { parse_mode: options.parse_mode } : {}),
+    ...(options.reply_markup ? { reply_markup: options.reply_markup } : {})
+  });
+  return edited !== undefined;
+}
+
+// Takes the buttons off a message, so they can no longer be pressed.
+export async function clearKeyboard(env: Env, chatId: ChatId, messageId: number) {
+  await callTelegram(env, "editMessageReplyMarkup", {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: { inline_keyboard: [] }
+  });
+}
+
+// A message whose button was pressed, as Telegram sends it along with the press.
+export interface PressedMessage {
+  messageId: number;
+  text?: string;
+  // The formatting of text (bold, links); kept when the message is edited.
+  entities?: unknown[];
+  reply_markup?: { inline_keyboard: InlineKeyboardButton[][] };
+}
+
+// The text of the pressed button.
+export function pressedLabel(message: PressedMessage, data: string | undefined) {
+  const button = message.reply_markup?.inline_keyboard
+    .flat()
+    .find(b => "callback_data" in b && b.callback_data === data);
+  return button?.text;
+}
+
+/**
+ * Marks the question in message as answered: the buttons go and the answer is added below the
+ * text, so the chat keeps showing what was chosen. Without an answer, or when the text would get
+ * too long, only the buttons go.
+ */
+export async function markAnswered(env: Env, chatId: ChatId, message: PressedMessage, answer: string | undefined) {
+  const text = message.text && answer ? `${message.text}\n\n➡️ ${answer}` : undefined;
+  if (text && text.length <= MAX_MESSAGE_LENGTH) {
+    const edited = await callTelegram(env, "editMessageText", {
+      chat_id: chatId,
+      message_id: message.messageId,
+      text,
+      ...(message.entities ? { entities: message.entities } : {}),
+      reply_markup: { inline_keyboard: [] }
+    });
+    if (edited !== undefined) return;
+  }
+  await clearKeyboard(env, chatId, message.messageId);
 }
 
 // The bot's own username, asked once per isolate; undefined while getMe fails.

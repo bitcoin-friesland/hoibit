@@ -13,6 +13,9 @@ export interface SendOptions {
   parse_mode?: "HTML";
   // The step also takes a typed answer besides the buttons; in a group the bot then says how.
   accepts_text?: boolean;
+  // After a button press: replace the message with the pressed button instead of sending a new
+  // one, for a keyboard that changes in place such as the community picker.
+  replace?: boolean;
 }
 
 export type SendMessage = (env: Env, chatId: ChatId, text: string, options?: SendOptions) => Promise<void>;
@@ -38,6 +41,9 @@ export interface Session {
   last_callback_data?: string | null;
   // message_id of the last message with buttons sent in this flow; only its buttons count.
   keyboard_message_id?: number;
+  // How the pressed message records the answer, when the button's text does not say it (the
+  // communities chosen with "Done"); set by the flow, used and cleared after its step.
+  pressed_answer?: string;
 
   // contact flow
   name?: string;
@@ -120,7 +126,13 @@ export interface TelegramUpdate {
     data?: string;
     from: TelegramUser;
     // The message the pressed button belongs to.
-    message: { message_id?: number; chat: { id: number } };
+    message: {
+      message_id?: number;
+      chat: { id: number };
+      text?: string;
+      entities?: unknown[];
+      reply_markup?: { inline_keyboard: InlineKeyboardButton[][] };
+    };
   };
 }
 
