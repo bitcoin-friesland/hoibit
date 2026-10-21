@@ -1,3 +1,4 @@
+import { env as testEnv, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 
@@ -14,8 +15,19 @@ interface SentDocument {
   text: string;
 }
 
-const env = { TELEGRAM_TOKEN: "test-token", TELEGRAM_CHAT_ID: "-100123" } as unknown as Env;
-const envWithFallback = { ...env, FALLBACK_EMAIL: "backup@example.org" } as Env;
+// TELEGRAM_TOKEN and TELEGRAM_CHAT_ID come from vitest.config.ts.
+const env = testEnv as Env;
+// For the last resort: an outbox that cannot be reached.
+const noOutbox = {
+  ...env,
+  OUTBOX: {
+    idFromName: () => {
+      throw new Error("Outbox unavailable");
+    }
+  }
+} as unknown as Env;
+const envWithFallback = { ...noOutbox, FALLBACK_EMAIL: "backup@example.org" } as Env;
+const outbox = () => env.OUTBOX.get(env.OUTBOX.idFromName("outbox"));
 let sent: SentMessage[];
 let documents: SentDocument[];
 let calls: number;
@@ -57,7 +69,15 @@ function instantTimers() {
   }) as unknown as typeof setTimeout);
 }
 
-beforeEach(() => stubTelegram());
+beforeEach(async () => {
+  stubTelegram();
+  // Durable Object storage is shared between tests.
+  await runInDurableObject(outbox(), async (_instance, state) => {
+    state.storage.sql.exec("DELETE FROM sends");
+    state.storage.kv.delete("failures");
+    await state.storage.deleteAlarm();
+  });
+});
 afterEach(() => vi.restoreAllMocks());
 
 function mail(headers: string[], body: string) {
@@ -187,7 +207,7 @@ describe("email handler", () => {
     expect(message.setReject).not.toHaveBeenCalled();
   });
 
-  it("E2 fails loudly without FALLBACK_EMAIL when Telegram keeps refusing it", async () => {
+  it("E2 fails loudly when neither the outbox nor FALLBACK_EMAIL can take the email", async () => {
     instantTimers();
     stubTelegram(() =>
       Response.json(
@@ -196,7 +216,7 @@ describe("email handler", () => {
       )
     );
     const message = mail(PLAIN, "Hello");
-    await expect(worker.email(message, env)).rejects.toThrow(/429/);
+    await expect(worker.email(message, noOutbox)).rejects.toThrow(/Outbox unavailable/);
     expect(message.forward).not.toHaveBeenCalled();
     expect(message.setReject).not.toHaveBeenCalled();
   });
@@ -240,7 +260,8 @@ describe("email handler", () => {
 
   it("treats a 200 answer with ok: false as a failure", async () => {
     stubTelegram(() => Response.json({ ok: false, description: "Bad Request: chat not found" }));
-    await expect(worker.email(mail(PLAIN, "Hello"), env)).rejects.toThrow(/chat not found/);
+    await worker.email(mail(PLAIN, "Hello"), env);
+    expect(await waiting()).toHaveLength(2);
   });
 
   it("E3 sends a long email as one message plus the full text as email.txt", async () => {
@@ -397,6 +418,105 @@ describe("email handler", () => {
       env
     );
     expect(unescape(sent[0].text)).toContain("📬 To: Board: Bob <bob@example.com>, carol@example.com\n");
+  });
+});
+
+// The rows waiting in the outbox, oldest first, and when the outbox will retry.
+async function waiting() {
+  return runInDurableObject(outbox(), (_instance, state) =>
+    state.storage.sql.exec<{ kind: string; text: string }>("SELECT kind, text FROM sends ORDER BY id").toArray()
+  );
+}
+const alarmAt = () => runInDurableObject(outbox(), (_instance, state) => state.storage.getAlarm());
+
+const telegramDown = () => new Response("Bad Gateway", { status: 502 });
+
+describe("outbox", () => {
+  it("keeps the email in Cloudflare when Telegram is down, and delivers it later", async () => {
+    instantTimers();
+    stubTelegram(telegramDown);
+    const message = mail(PLAIN, "Hello");
+    const before = Date.now();
+    await worker.email(message, env);
+    expect(message.forward).not.toHaveBeenCalled();
+    expect(message.setReject).not.toHaveBeenCalled();
+    expect(await waiting()).toHaveLength(2);
+    expect(await alarmAt()).toBeGreaterThanOrEqual(before + 60_000);
+
+    stubTelegram();
+    expect(await runDurableObjectAlarm(outbox())).toBe(true);
+    expect(sent.map(m => unescape(m.text))).toEqual([
+      expect.stringMatching(/^⏳ Delayed: the next email arrived \d{4}-\d\d-\d\d \d\d:\d\d UTC, when Telegram/),
+      expect.stringContaining("📝 Subject: Test\n\nHello")
+    ]);
+    expect(sent[1].text).toMatch(/^📩 <b>New Email<\/b>/);
+    expect(await waiting()).toEqual([]);
+  });
+
+  it("stores only the parts Telegram did not take", async () => {
+    instantTimers();
+    let n = 0;
+    stubTelegram(() => (n++ === 0 ? Response.json({ ok: true, result: {} }) : telegramDown()));
+    const body = Array.from({ length: 250 }, (_, i) => `line ${i} of a fairly long newsletter text`).join("\n");
+    await worker.email(mail(PLAIN, body), env);
+    const first = unescape(sent[0].text);
+    const rest = await waiting();
+    expect(rest[0].text).toMatch(/^⏳ The rest of an email that arrived/);
+    expect(rest.slice(1).map(r => r.kind)).toEqual(["message", "message"]);
+
+    stubTelegram();
+    await runDurableObjectAlarm(outbox());
+    expect(
+      first +
+        sent
+          .slice(1)
+          .map(m => unescape(m.text))
+          .join("")
+    ).toContain(body);
+    expect(await waiting()).toEqual([]);
+  });
+
+  it("waits twice as long after each failed retry, up to an hour", async () => {
+    instantTimers();
+    stubTelegram(telegramDown);
+    await worker.email(mail(PLAIN, "Hello"), env);
+    const waits: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      const before = Date.now();
+      await runDurableObjectAlarm(outbox());
+      waits.push(Math.round(((await alarmAt())! - before) / 60_000));
+    }
+    expect(waits).toEqual([1, 2, 4, 8, 16, 32, 60, 60]);
+    expect(await waiting()).toHaveLength(2);
+  });
+
+  it("keeps a text longer than one row holds whole", async () => {
+    instantTimers();
+    stubTelegram(telegramDown);
+    const body = "é".repeat(1_200_000) + "😀 end";
+    await worker.email(mail(PLAIN, body), env);
+    const rows = await waiting();
+    expect(rows.map(r => r.kind)).toEqual(["message", "message", "document", "document", "document"]);
+
+    stubTelegram();
+    await runDurableObjectAlarm(outbox());
+    expect(documents).toHaveLength(1);
+    expect(documents[0].text).toContain(body);
+  });
+
+  it("retries right away once Telegram takes a new email", async () => {
+    instantTimers();
+    stubTelegram(telegramDown);
+    await worker.email(mail(PLAIN, "First"), env);
+    stubTelegram();
+    const before = Date.now();
+    await worker.email(mail(PLAIN, "Second"), env);
+    expect(await alarmAt()).toBeLessThanOrEqual(before + 1000);
+  });
+
+  it("does not set an alarm when nothing is waiting", async () => {
+    await worker.email(mail(PLAIN, "Hello"), env);
+    expect(await alarmAt()).toBeNull();
   });
 });
 

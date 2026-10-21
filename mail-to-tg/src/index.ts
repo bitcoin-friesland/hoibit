@@ -1,5 +1,9 @@
 import PostalMime, { type Address, type Email } from "postal-mime";
 import { htmlToText } from "./html-to-text";
+import { enqueue, retrySoon } from "./outbox";
+import { deliver, sleep, type Send } from "./telegram";
+
+export { Outbox } from "./outbox";
 
 // Telegram counts the 4096 limit after entity parsing, so the escaping below does not count.
 const MAX_MESSAGE_LENGTH = 4096;
@@ -11,13 +15,7 @@ const MAX_LISTED = 10;
 const MAX_ADDRESS_LENGTH = 200;
 const MAX_FILENAME_LENGTH = 100;
 const MAX_SUBJECT_LENGTH = 300;
-const MAX_RETRY_WAIT_SECONDS = 30;
 const ATTACHED_NOTE = "📄 Full text attached as email.txt";
-
-// Telegram HTML parse mode: only <, > and & in text need escaping.
-function escapeHtml(text: string) {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
 
@@ -101,79 +99,8 @@ function bodyText(parsed: Email) {
   return "(No content)";
 }
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-interface TelegramResponse {
-  ok?: boolean;
-  description?: string;
-  parameters?: { retry_after?: number };
-}
-
-// Calls the Bot API and throws unless Telegram confirms with ok: true. Waits out 429s
-// (up to MAX_RETRY_WAIT_SECONDS in total) and retries a 5xx or network error once.
-async function callTelegram(env: Env, method: string, body: string | FormData) {
-  const url = `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`;
-  const init: RequestInit = { method: "POST", body };
-  if (typeof body === "string") init.headers = { "Content-Type": "application/json" };
-
-  let waited = 0;
-  let retried = false;
-  for (;;) {
-    let resp: Response;
-    try {
-      resp = await fetch(url, init);
-    } catch (err) {
-      if (retried) throw new Error(`Telegram ${method} failed: ${err}`, { cause: err });
-      console.warn(`Telegram ${method} network error, retrying once:`, err);
-      retried = true;
-      await sleep(1000);
-      continue;
-    }
-
-    const data = (await resp.json().catch(() => ({}))) as TelegramResponse;
-    if (resp.ok && data.ok) return;
-
-    const reason = `${resp.status} ${data.description ?? resp.statusText}`;
-    if (resp.status === 429) {
-      const wait = Math.max(1, data.parameters?.retry_after ?? 1);
-      if (waited + wait <= MAX_RETRY_WAIT_SECONDS) {
-        console.warn(`Telegram ${method} rate limited, retrying after ${wait}s`);
-        waited += wait;
-        await sleep(wait * 1000);
-        continue;
-      }
-    } else if (resp.status >= 500 && !retried) {
-      console.warn(`Telegram ${method} failed with ${reason}, retrying once`);
-      retried = true;
-      await sleep(1000);
-      continue;
-    }
-    throw new Error(`Telegram ${method} failed: ${reason}`);
-  }
-}
-
-async function sendMessage(env: Env, text: string, first: boolean) {
-  const html = escapeHtml(text);
-  await callTelegram(
-    env,
-    "sendMessage",
-    JSON.stringify({
-      chat_id: env.TELEGRAM_CHAT_ID,
-      text: first ? html.replace("📩 New Email", "📩 <b>New Email</b>") : html,
-      parse_mode: "HTML"
-    })
-  );
-}
-
-async function sendDocument(env: Env, text: string) {
-  const form = new FormData();
-  form.append("chat_id", String(env.TELEGRAM_CHAT_ID));
-  form.append("document", new File([text], "email.txt", { type: "text/plain;charset=utf-8" }));
-  await callTelegram(env, "sendDocument", form);
-}
-
-async function forwardToTelegram(message: ForwardableEmailMessage, env: Env) {
-  const parsed = await PostalMime.parse(message.raw);
+// The Bot API calls that carry an email, in order.
+function plan(parsed: Email): Send[] {
   // Splitting happens before escaping, so no entity is cut in half.
   const full = buildHeader(parsed) + bodyText(parsed);
   // Telegram refuses a message that is only whitespace.
@@ -181,30 +108,62 @@ async function forwardToTelegram(message: ForwardableEmailMessage, env: Env) {
 
   if (parts.length > MAX_PARTS) {
     const [start] = splitText(full, MAX_MESSAGE_LENGTH - ATTACHED_NOTE.length - 4);
-    await sendMessage(env, `${start.trimEnd()}\n…\n\n${ATTACHED_NOTE}`, true);
-    await sendDocument(env, full);
-    console.log(`Forwarded email to Telegram as 1 message plus email.txt (${full.length} characters)`);
-    return;
+    return [
+      { kind: "message", text: `${start.trimEnd()}\n…\n\n${ATTACHED_NOTE}`, first: true },
+      { kind: "document", text: full }
+    ];
   }
+  return parts.map((text, i) => ({ kind: "message", text, first: i === 0 }));
+}
 
-  for (let i = 0; i < parts.length; i++) {
+// Sends every call in turn; returns how many went through before one failed, and the error.
+async function deliverAll(env: Env, sends: Send[]) {
+  for (let i = 0; i < sends.length; i++) {
     if (i > 0) await sleep(100);
-    await sendMessage(env, parts[i], i === 0);
+    try {
+      await deliver(env, sends[i]);
+    } catch (err) {
+      return { delivered: i, err };
+    }
   }
-  console.log(`Forwarded email to Telegram in ${parts.length} message(s)`);
+  return { delivered: sends.length };
+}
+
+// Last resort when the email can be neither read nor stored. No setReject: that bounces the
+// email permanently. Without a fallback mailbox the error is rethrown so the failure shows up
+// in Workers Logs and Email Routing.
+async function fallback(message: ForwardableEmailMessage, env: Env, err: unknown) {
+  if (!env.FALLBACK_EMAIL) throw err;
+  await message.forward(env.FALLBACK_EMAIL);
+  console.log("Forwarded email to FALLBACK_EMAIL instead");
 }
 
 export default {
   async email(message, env) {
+    const receivedAt = new Date();
+    let sends: Send[];
     try {
-      await forwardToTelegram(message, env);
+      sends = plan(await PostalMime.parse(message.raw));
     } catch (err) {
-      console.error("Failed to forward email to Telegram:", err);
-      // No setReject: that bounces the email permanently. Without a fallback mailbox the
-      // error is rethrown so the failure shows up in Workers Logs and Email Routing.
-      if (!env.FALLBACK_EMAIL) throw err;
-      await message.forward(env.FALLBACK_EMAIL);
-      console.log("Forwarded email to FALLBACK_EMAIL instead");
+      console.error("Could not read the email:", err);
+      return fallback(message, env, err);
+    }
+
+    const { delivered, err } = await deliverAll(env, sends);
+    if (!err) {
+      console.log(`Forwarded email to Telegram in ${sends.length} call(s)`);
+      // Telegram works again, so emails waiting in the outbox need not wait for their retry.
+      await retrySoon(env).catch(e => console.error("Could not wake the outbox:", e));
+      return;
+    }
+    console.error(`Failed to forward email to Telegram after ${delivered} of ${sends.length} call(s):`, err);
+    try {
+      // There is no mailbox behind the address, so the email waits in Cloudflare until Telegram takes it.
+      await enqueue(env, receivedAt, sends.slice(delivered), delivered > 0);
+      console.log("Stored the email in the outbox");
+    } catch (e) {
+      console.error("Could not store the email in the outbox:", e);
+      return fallback(message, env, e);
     }
   },
 

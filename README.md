@@ -6,7 +6,7 @@ Cloudflare Workers behind the Bitcoin Friesland community CRM: a Telegram bot fo
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | [crm-api](crm-api/)           | Owns the D1 database `crm`. Exposes its methods over [RPC](https://developers.cloudflare.com/workers/runtime-apis/rpc/) (`CrmApi extends WorkerEntrypoint`), no public HTTP. Writes an `audit_log` row for every change.                                                  | `DB` (D1)                                                            |
 | [telegram-crm](telegram-crm/) | Telegram webhook. Team members add contacts and organizations (`/newcontact`, `/neworg`), log conversations (`/logconversation`) and admins manage the team (`/teammember`, `/invite`). Looks up businesses in OpenStreetMap. Sessions live in a Durable Object per user. | `crmApi` (service → crm-api), `CHATS` (Durable Object `ChatSession`) |
-| [mail-to-tg](mail-to-tg/)     | Email Routing worker. Posts each incoming email to the team's Telegram group; never drops a message silently.                                                                                                                                                             | none                                                                 |
+| [mail-to-tg](mail-to-tg/)     | Email Routing worker. Posts each incoming email to the team's Telegram group. When Telegram is unreachable the email waits in a Durable Object and is retried (after 1 minute, doubling up to every hour) until Telegram takes it.                                        | `OUTBOX` (Durable Object `Outbox`)                                   |
 
 ## Requirements
 
@@ -35,12 +35,12 @@ telegram-crm calls crm-api over a service binding, so its types are generated fr
 
 Secrets are set with `npx wrangler secret put <NAME>` and never committed. Their names are declared in each worker's `src/env.d.ts`.
 
-| Worker       | Secret                    | Purpose                                                                                                                                                              |
-| ------------ | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| telegram-crm | `TELEGRAM_TOKEN`          | Bot API token from BotFather.                                                                                                                                        |
-| telegram-crm | `TELEGRAM_WEBHOOK_SECRET` | Compared with the `X-Telegram-Bot-Api-Secret-Token` header; without a match the bot answers 401. Set the same value as `secret_token` when registering the webhook.  |
-| mail-to-tg   | `TELEGRAM_TOKEN`          | Bot API token used to post to the group.                                                                                                                             |
-| mail-to-tg   | `FALLBACK_EMAIL`          | Optional. A verified Email Routing destination that receives the email when Telegram refuses it. Without it the worker throws, so the failure shows in Workers Logs. |
+| Worker       | Secret                    | Purpose                                                                                                                                                                                                        |
+| ------------ | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| telegram-crm | `TELEGRAM_TOKEN`          | Bot API token from BotFather.                                                                                                                                                                                  |
+| telegram-crm | `TELEGRAM_WEBHOOK_SECRET` | Compared with the `X-Telegram-Bot-Api-Secret-Token` header; without a match the bot answers 401. Set the same value as `secret_token` when registering the webhook.                                            |
+| mail-to-tg   | `TELEGRAM_TOKEN`          | Bot API token used to post to the group.                                                                                                                                                                       |
+| mail-to-tg   | `FALLBACK_EMAIL`          | Optional last resort: a verified Email Routing destination that receives the email when it can be neither posted nor stored in the outbox. Without it the worker throws, so the failure shows in Workers Logs. |
 
 mail-to-tg posts to the chat in `TELEGRAM_CHAT_ID` in [mail-to-tg/wrangler.toml](mail-to-tg/wrangler.toml).
 
