@@ -57,10 +57,38 @@ export async function callTelegram(env: Env, method: string, body: string | Form
   }
 }
 
-// The button under the last message of every email (see buttons.ts).
-export const spamKeyboard = (email: number) => ({
-  inline_keyboard: [[{ text: "🚫 Spam", callback_data: `spam:${email}` }]]
-});
+// The bot's username, asked once per isolate; undefined while getMe fails.
+let botUsername: string | undefined;
+
+async function ownUsername(env: Env) {
+  if (botUsername) return botUsername;
+  try {
+    botUsername = ((await callTelegram(env, "getMe", "{}")) as { username?: string } | undefined)?.username;
+  } catch (err) {
+    console.error("Could not get the bot's username:", err);
+  }
+  return botUsername;
+}
+
+// For tests, which start every case without it.
+export function forgetBotUsername() {
+  botUsername = undefined;
+}
+
+/**
+ * The buttons under the last message of every email: 🚫 Spam (see buttons.ts), and ➕ Contact,
+ * which opens the private chat with the bot (telegram-crm) as t.me/<bot>?start=mc_<email>, so a
+ * team member can save the sender as a contact. Without the bot's username only the first.
+ */
+export async function emailKeyboard(env: Env, email: number) {
+  const username = await ownUsername(env);
+  const spam = { text: "🚫 Spam", callback_data: `spam:${email}` };
+  return {
+    inline_keyboard: [
+      username ? [spam, { text: "➕ Contact", url: `https://t.me/${username}?start=mc_${email}` }] : [spam]
+    ]
+  };
+}
 
 // Returns the id of the message Telegram created.
 function messageId(result: unknown) {
@@ -78,7 +106,7 @@ async function sendMessage(env: Env, send: Send & { kind: "message" }) {
       text: send.first ? html.replace("📩 New Email", "📩 <b>New Email</b>") : html,
       parse_mode: "HTML",
       ...(send.silent ? { disable_notification: true } : {}),
-      ...(send.button && send.email !== undefined ? { reply_markup: spamKeyboard(send.email) } : {})
+      ...(send.button && send.email !== undefined ? { reply_markup: await emailKeyboard(env, send.email) } : {})
     })
   );
   return messageId(result);
@@ -89,7 +117,9 @@ async function sendDocument(env: Env, send: Send & { kind: "document" }) {
   form.append("chat_id", String(env.TELEGRAM_CHAT_ID));
   form.append("document", new File([send.text], "email.txt", { type: "text/plain;charset=utf-8" }));
   if (send.silent) form.append("disable_notification", "true");
-  if (send.button && send.email !== undefined) form.append("reply_markup", JSON.stringify(spamKeyboard(send.email)));
+  if (send.button && send.email !== undefined) {
+    form.append("reply_markup", JSON.stringify(await emailKeyboard(env, send.email)));
+  }
   return messageId(await callTelegram(env, "sendDocument", form));
 }
 

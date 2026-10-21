@@ -1,6 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { blocklist } from "./blocklist";
-import { callTelegram, spamKeyboard } from "./telegram";
+import { callTelegram, emailKeyboard } from "./telegram";
 
 const BUTTON = /^spam:(\d+)(?::(yes|no))?$/;
 const STALE = "This button is no longer active.";
@@ -33,6 +33,12 @@ async function setKeyboard(env: Env, messageId: number, keyboard: object) {
  * messages. Later emails from a blocked sender are dropped (see index.ts).
  */
 export class SpamButtons extends WorkerEntrypoint<Env> {
+  // The sender of a recent email, for the ➕ Contact button; undefined when it is unknown.
+  async sender(email: number): Promise<{ address: string; name: string } | undefined> {
+    const record = await blocklist(this.env).find(email);
+    return record?.sender ? { address: record.sender, name: record.name } : undefined;
+  }
+
   // Returns the notice Telegram shows on the button.
   async press(data: string, chatId: number, messageId: number): Promise<string | Alert> {
     const match = BUTTON.exec(data);
@@ -47,7 +53,7 @@ export class SpamButtons extends WorkerEntrypoint<Env> {
       return "Delete this email and block its sender?";
     }
     if (match[2] === "no") {
-      await setKeyboard(this.env, messageId, spamKeyboard(id));
+      await setKeyboard(this.env, messageId, await emailKeyboard(this.env, id));
       return "Cancelled.";
     }
 

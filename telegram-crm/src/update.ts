@@ -52,10 +52,12 @@ interface Notice {
 }
 
 // mail-to-tg's SpamButtons entrypoint (mail-to-tg/src/buttons.ts). Its types are not imported:
-// they would type-check mail-to-tg's code against this Worker's Env. It answers with the notice
-// text, or with a Notice for one the user must not miss.
+// they would type-check mail-to-tg's code against this Worker's Env. press answers with the
+// notice text, or with a Notice for one the user must not miss; sender gives the sender of a
+// recent email, for its ➕ Contact button.
 interface SpamButtons {
   press(data: string, chatId: number, messageId: number): Promise<string | Notice>;
+  sender(email: number): Promise<{ address: string; name: string } | undefined>;
 }
 
 // The command that starts each flow, to name a flow that was stopped.
@@ -168,6 +170,30 @@ function asQuestion(
       reply_parameters: { message_id: replyTo, allow_sending_without_reply: true }
     }
   ];
+}
+
+/**
+ * /start mc_<email>: the ➕ Contact button under an email (mail-to-tg) opened the private chat.
+ * Starts /newcontact with the sender's address and name; without a sender, a plain /newcontact.
+ */
+async function startContactFromEmail(env: Env, store: SessionStore, actor: Actor, email: number) {
+  const sender = await (env.mailToTg as unknown as SpamButtons).sender(email).catch((e: unknown) => {
+    console.error("Looking up the sender of an email failed", e);
+    return undefined;
+  });
+  if (!sender) {
+    await sendMessage(env, actor.chatId, "ℹ️ The sender of that email is no longer known.");
+    await startCommandFlow(env, store, actor, "newcontact");
+    return;
+  }
+  await startFlow(env, store, actor, {
+    step: "from_email",
+    mode: "contact",
+    email: sender.address,
+    pending_contact_name: sender.name,
+    created_by: actor.member.id,
+    telegram_id: actor.userId
+  });
 }
 
 // The chat a Telegram update belongs to; updates without one are ignored.
@@ -544,6 +570,10 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
   if (command) {
     // The "Open private chat" button of /invite in a group opens t.me/<bot>?start=invite.
     const name = command.name === "start" && command.args === "invite" ? "invite" : command.name;
+    if (name === "start" && command.args.startsWith("mc_")) {
+      await startContactFromEmail(env, store, actor, Number(command.args.slice("mc_".length)));
+      return reply("OK");
+    }
     if (name === "start" || name === "help") {
       const greeting = user.first_name ? `👋 Hi ${user.first_name}!` : "👋 Hi!";
       await sendMenu(env, chatId, isAdmin, `${greeting} What do you want to do?`);

@@ -188,7 +188,7 @@ export default {
     }
     const spam = await spamReason(env, parsed, bodyText(parsed), message.to);
     const email = await orElse(
-      () => blocklist(env).addEmail(sender),
+      () => blocklist(env).addEmail(sender, parsed.from?.name?.trim() ?? ""),
       undefined,
       "Could not add the email to the blocklist:"
     );
