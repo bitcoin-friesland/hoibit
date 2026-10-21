@@ -10,7 +10,7 @@
     "test": "vitest run",
     "typecheck": "wrangler types --check && tsc"
   },
-  "license": "ISC",
+  "license": "Unlicense",
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.6",
     "typescript": "^6.0.3",
