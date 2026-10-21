@@ -3,9 +3,10 @@ import { createSerialQueue } from "./helpers/queue";
 import { processUpdate } from "./update";
 import type { Session, SessionStore, TelegramUpdate, UpdateResult } from "./types";
 
-export const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+// A flow can be resumed within a working day; after that it is forgotten.
+export const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 export const UNAUTHORIZED_NOTICE_TTL_MS = 24 * 60 * 60 * 1000;
-// Storage of a chat is wiped this long after its last update.
+// Storage of a chat is wiped this long after its last update; at least the longest TTL above.
 export const CLEANUP_AFTER_MS = 24 * 60 * 60 * 1000;
 
 /**

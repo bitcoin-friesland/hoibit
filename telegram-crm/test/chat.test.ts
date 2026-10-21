@@ -13,18 +13,24 @@ beforeEach(async () => {
 });
 
 describe("storeFor", () => {
-  it("expires the session after two hours and the unauthorized notice after a day", () => {
-    let now = 1_000_000;
+  it("expires the session and the unauthorized notice after their TTL", () => {
+    const start = 1_000_000;
+    let now = start;
     const store = storeFor(memoryKv(), () => now);
     store.putSession({ mode: "contact", step: "awaiting_name" });
     store.markUnauthorizedNotified();
-    now += SESSION_TTL_MS - 1;
+    now = start + SESSION_TTL_MS - 1;
     expect(store.getSession()).toEqual({ mode: "contact", step: "awaiting_name" });
-    now += 1;
+    now = start + SESSION_TTL_MS;
     expect(store.getSession()).toBeUndefined();
+    now = start + UNAUTHORIZED_NOTICE_TTL_MS - 1;
     expect(store.wasUnauthorizedNotified()).toBe(true);
-    now = 1_000_000 + UNAUTHORIZED_NOTICE_TTL_MS;
+    now = start + UNAUTHORIZED_NOTICE_TTL_MS;
     expect(store.wasUnauthorizedNotified()).toBe(false);
+  });
+
+  it("is wiped no earlier than its data expires", () => {
+    expect(CLEANUP_AFTER_MS).toBeGreaterThanOrEqual(Math.max(SESSION_TTL_MS, UNAUTHORIZED_NOTICE_TTL_MS));
   });
 });
 
