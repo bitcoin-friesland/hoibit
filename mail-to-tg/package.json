@@ -10,7 +10,7 @@
     "typecheck": "wrangler types --check && tsc",
     "test": "vitest run"
   },
-  "license": "ISC",
+  "license": "Unlicense",
   "dependencies": {
     "postal-mime": "^2.4.3"
   },

@@ -65,7 +65,8 @@ interface OverpassElement {
   [key: string]: unknown;
 }
 
-const USER_AGENT = "crm-btc/1.0 (contact@btc.com)";
+// Nominatim and Overpass require a real contact; this address reaches the team via mail-to-tg.
+const USER_AGENT = "hoibit-telegram-crm/1.0 (info@bitcoinfriesland.com)";
 const OSM_KEYS = "shop amenity office craft industrial tourism leisure healthcare religion farm landuse".split(" ");
 
 // Nominatim's usage policy allows at most 1 request per second. Each caller reserves the next free
