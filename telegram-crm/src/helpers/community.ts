@@ -1,11 +1,12 @@
 /**
- * Community selection helpers for interactive flows (contacts and team member invites).
+ * Community selection helpers for interactive flows (contacts, team member invites and edits).
  *
  * Telegram delivers every button press as a separate update, so the picker keeps its state
  * in the session (a plain object returned by startCommunityPicker) instead of in callbacks.
  *
  * Usage in a flow step:
  *   session.picker = await startCommunityPicker(env, session.telegram_id);
+ *   // or, to edit an existing selection: startCommunityPicker(env, session.telegram_id, current)
  *   await sendMessage(env, chatId, ...renderCommunityPicker(session.picker, title));
  *   // next update(s):
  *   const result = await handleCommunityPickerInput(env, session.picker, session.last_callback_data);
@@ -29,18 +30,25 @@ export type PickerResult = "updated" | "done" | "skip" | "invalid" | { error: st
 
 /**
  * Creates picker state, preloaded with the team member's own communities.
+ * preselected communities (e.g. the current ones of a member being edited) start
+ * selected and are shown first, next to the own ones.
  */
-export async function startCommunityPicker(env: Env, telegramId: string | undefined): Promise<CommunityPicker> {
+export async function startCommunityPicker(
+  env: Env,
+  telegramId: string | undefined,
+  preselected: PickedCommunity[] = []
+): Promise<CommunityPicker> {
   let own: { id: number; name: string; region: string | null }[] = [];
   try {
     if (telegramId) own = await env.crmApi.teamMemberCommunities(telegramId);
   } catch {
     own = [];
   }
+  const shown = [...preselected, ...own.filter(c => !preselected.some(p => p.id === c.id))];
   return {
-    own: own.map(c => c.id),
-    known: Object.fromEntries(own.map(c => [c.id, { name: c.name, region: c.region || null }])),
-    selected: [],
+    own: shown.map(c => c.id),
+    known: Object.fromEntries(shown.map(c => [c.id, { name: c.name, region: c.region || null }])),
+    selected: preselected.map(c => c.id),
     countries: null,
     country: null,
     countryIds: null

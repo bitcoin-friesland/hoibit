@@ -72,7 +72,15 @@ export interface Session {
   invite_picker?: CommunityPicker;
   invite_communities?: PickedCommunity[];
   admin_action?: "grant" | "revoke";
+  // team_members.id -> label (name, or Telegram ID when the member has no name)
   admin_candidates?: Record<string, string | null>;
+  // edit or remove an existing team member
+  member_action?: "edit" | "remove";
+  member_choices?: Record<string, { telegram_id: string; label: string }>;
+  member_id?: string;
+  member_telegram_id?: string;
+  member_label?: string;
+  edit_picker?: CommunityPicker;
 }
 
 /**
