@@ -9,6 +9,15 @@ preview_urls = true
 [vars]
 TELEGRAM_CHAT_ID = "-1002557433889"
 
+# Emails Telegram did not take wait here until it does (src/outbox.ts).
+[[durable_objects.bindings]]
+name = "OUTBOX"
+class_name = "Outbox"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Outbox"]
+
 # Keep logs in Workers Logs (free: 200k events a day, 3 days retention).
 [observability]
 enabled = true
