@@ -369,13 +369,8 @@ async function startCommandFlow(env: Env, store: SessionStore, actor: Actor, com
       );
       return true;
     case "logconversation":
-      await startFlow(
-        env,
-        store,
-        actor,
-        { step: "awaiting_contact", mode: "conversation", ...owner },
-        "Which contact did you talk to? Type part of the name."
-      );
+      // The first step offers the member's recent contacts as buttons.
+      await startFlow(env, store, actor, { step: "conversation_start", mode: "conversation", ...owner });
       return true;
     case "invite":
     case "teammember":
