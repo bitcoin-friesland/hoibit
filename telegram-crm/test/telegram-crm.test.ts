@@ -1,7 +1,15 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { escapeForOverpass } from "../src/helpers/osm";
-import { addAdmin, callbackAnswers, chatAs, groupChat, resetAndStubFetch, type SentMessage } from "./harness";
+import {
+  addAdmin,
+  callbackAnswers,
+  chatAs,
+  groupChat,
+  lastKeyboardMessage,
+  resetAndStubFetch,
+  type SentMessage
+} from "./harness";
 
 const ADMIN = 5001;
 let sent: SentMessage[];
@@ -86,9 +94,9 @@ describe("/newcontact", () => {
     await chat.press("skip");
     await chat.press("choose_other");
     await chat.press("country:0");
-    // sendMessage serializes reply_markup; press the first community of the country
-    const keyboard = JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard;
-    await chat.press(keyboard[0][0].callback_data);
+    // The picker shows the country in the same message; press its first community.
+    const keyboard = lastKeyboardMessage(ADMIN)!.reply_markup!.inline_keyboard;
+    await chat.press(keyboard[0][0].callback_data!);
     await chat.press("done");
     expect(lastText()).toMatch(/^✅ Organization "Cafe Satoshi" and contact "Bob" added\. \(communities: .+\)$/);
 
@@ -182,7 +190,8 @@ describe("/logconversation", () => {
     await chat.text("ali");
     expect(lastText()).toBe("Select the contact:");
     expect(JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard).toEqual([
-      [{ text: "Alice", callback_data: `select_contact:${contactId}` }]
+      [{ text: "Alice", callback_data: `select_contact:${contactId}` }],
+      [{ text: "✖️ Cancel", callback_data: "cancel" }]
     ]);
     await chat.press(`select_contact:${contactId}`);
     expect(lastText()).toBe("How did you talk to Alice?");

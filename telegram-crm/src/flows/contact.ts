@@ -7,6 +7,7 @@ import {
   contactInput,
   errorText,
   handleOrganizationStep,
+  logConversationButton,
   startOrganizationSteps
 } from "./organization";
 import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
@@ -21,6 +22,7 @@ async function addContact(
   organizationId: number | null,
   doneText: string
 ) {
+  let contactId: number;
   try {
     const res = await env.crmApi.newContact({ ...contactInput(session), organization_id: organizationId });
     if (!res.ok) {
@@ -28,12 +30,13 @@ async function addContact(
       await removeSession();
       return;
     }
+    contactId = res.id;
   } catch (e) {
     await sendMessage(env, chatId, errorMessage(`Error adding contact: ${errorText(e)}`));
     await removeSession();
     return;
   }
-  await sendMessage(env, chatId, successMessage(doneText));
+  await sendMessage(env, chatId, successMessage(doneText), logConversationButton(contactId, session.name ?? ""));
   await removeSession();
 }
 

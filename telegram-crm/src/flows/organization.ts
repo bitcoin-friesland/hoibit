@@ -11,10 +11,11 @@ import {
   startCommunityPicker,
   renderCommunityPicker,
   handleCommunityPickerInput,
+  pickedAnswer,
   pickedCommunities
 } from "../helpers/community";
 import { findOsmNodeForOrganization, type OsmResult } from "../helpers/osm";
-import type { ChatId, SendMessage, Session } from "../types";
+import type { ChatId, SendMessage, SendOptions, Session } from "../types";
 
 const ORG_STATUS_CODE_TO_ID: Record<string, number> = {
   "btc-curious": 1,
@@ -46,6 +47,11 @@ export const INVALID_ORGANIZATION_NAME =
   "Please enter a valid organization name (organization names should be words, not a phone number or symbols).";
 
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+// A button under a new contact that starts logging a conversation with them (log:<id>).
+export const logConversationButton = (contactId: number, name: string): SendOptions => ({
+  reply_markup: { inline_keyboard: [[{ text: `💬 Log conversation with ${name}`, callback_data: `log:${contactId}` }]] }
+});
 
 // The command that starts the user's flow again.
 const restartCommand = (session: Session) => (session.mode === "org" ? "/neworg" : "/newcontact");
@@ -120,13 +126,20 @@ async function saveOrganization(
   if (session.mode === "contact") {
     try {
       const res = await env.crmApi.newContact({ ...contactInput(session), new_organization: organization });
-      await sendMessage(
-        env,
-        chatId,
-        res.ok
-          ? successMessage(`Organization "${session.organization}" and contact "${session.name}" added.${suffix}`)
-          : errorMessage(`Failed to add organization and contact (code ${res.status}). Nothing was saved.`)
-      );
+      if (res.ok) {
+        await sendMessage(
+          env,
+          chatId,
+          successMessage(`Organization "${session.organization}" and contact "${session.name}" added.${suffix}`),
+          logConversationButton(res.id, session.name ?? "")
+        );
+      } else {
+        await sendMessage(
+          env,
+          chatId,
+          errorMessage(`Failed to add organization and contact (code ${res.status}). Nothing was saved.`)
+        );
+      }
     } catch (e) {
       await sendMessage(
         env,
@@ -320,8 +333,9 @@ export async function handleOrganizationStep(
       const result = await handleCommunityPickerInput(env, picker, cb);
       await persistSession();
       if (result === "updated") {
-        await sendMessage(env, chatId, ...renderCommunityPicker(picker, ORG_PICKER_TITLE));
+        await sendMessage(env, chatId, ...renderCommunityPicker(picker, ORG_PICKER_TITLE, { replace: true }));
       } else if (result === "done" || result === "skip") {
+        if (result === "done") session.pressed_answer = pickedAnswer(picker);
         session.organization_communities = result === "skip" ? [] : pickedCommunities(picker);
         await persistSession();
         await lookupOsmAndContinue(sendMessage, env, chatId, session, persistSession, removeSession);

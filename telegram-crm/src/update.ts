@@ -2,11 +2,23 @@ import { handleContactFlow } from "./flows/contact";
 import { handleNewOrgFlow } from "./flows/org";
 import { handleConversationFlow } from "./flows/conversation";
 import { handleTeamMemberFlow } from "./flows/teammember";
-import { errorMessage } from "./helpers/messaging";
-import { botUsername, callTelegram, sendMessage, type ApiSendOptions } from "./helpers/telegram";
+import { ensureCommandMenus, helpText, menuKeyboard } from "./helpers/menu";
+import { errorMessage, isErrorMessage } from "./helpers/messaging";
+import {
+  botUsername,
+  callTelegram,
+  clearKeyboard,
+  editMessage,
+  markAnswered,
+  pressedLabel,
+  sendMessage,
+  type ApiSendOptions,
+  type PressedMessage
+} from "./helpers/telegram";
 import type {
   ChatId,
   FlowHandler,
+  InlineKeyboardButton,
   SendMessage,
   SendOptions,
   Session,
@@ -33,11 +45,28 @@ const NOT_ON_TEAM = "You're not on the team yet. To join, ask an admin for an in
 const INVALID_INVITE =
   "This invite link is no longer valid: it was used already or it expired. Ask an admin for a new one.";
 
-// mail-to-tg's SpamButtons entrypoint (mail-to-tg/src/buttons.ts). Its types are not imported:
-// they would type-check mail-to-tg's code against this Worker's Env.
-interface SpamButtons {
-  press(data: string, chatId: number, messageId: number): Promise<string>;
+// A short notice Telegram shows on a pressed button; with alert, in a box the user closes.
+interface Notice {
+  text: string;
+  alert?: boolean;
 }
+
+// mail-to-tg's SpamButtons entrypoint (mail-to-tg/src/buttons.ts). Its types are not imported:
+// they would type-check mail-to-tg's code against this Worker's Env. It answers with the notice
+// text, or with a Notice for one the user must not miss.
+interface SpamButtons {
+  press(data: string, chatId: number, messageId: number): Promise<string | Notice>;
+}
+
+// The command that starts each flow, to name a flow that was stopped.
+const FLOW_COMMANDS: Record<NonNullable<Session["mode"]>, string> = {
+  contact: "/newcontact",
+  org: "/neworg",
+  conversation: "/logconversation",
+  teammember: "/teammember"
+};
+
+const CANCEL_BUTTON = { text: "✖️ Cancel", callback_data: "cancel" };
 
 const COMMAND = /^\/(\w+)(?:@(\w+))?(?:\s+(.*))?$/;
 
@@ -64,17 +93,6 @@ async function parseCommand(env: Env, text: string) {
 // The name in a user's Telegram profile.
 const profileName = (user: TelegramUser) => [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
 
-function helpText(isAdmin: boolean) {
-  const adminCommands = isAdmin
-    ? `\n/teammember - Manage team members (invite, edit, remove, admin rights)\n/invite - Make an invite link for a new team member`
-    : "";
-  return `Available commands:
-/newcontact - Add new contact
-/neworg - Add new organization
-/logconversation - Log a conversation${adminCommands}
-/cancel - Cancel current input`;
-}
-
 // Keeps the member's @username in crm-api the one Telegram reports; a failure is only logged.
 async function syncUsername(env: Env, member: TeamMember, user: TelegramUser) {
   const username = user.username ?? null;
@@ -82,6 +100,11 @@ async function syncUsername(env: Env, member: TeamMember, user: TelegramUser) {
   await env.crmApi
     .setTelegramUsername({ telegram_id: member.telegram_id, telegram_username: username })
     .catch((e: unknown) => console.error("Updating the Telegram username failed", e));
+}
+
+// The main menu below intro: buttons for the usual flows, and the command list.
+async function sendMenu(env: Env, chatId: ChatId, isAdmin: boolean, intro: string) {
+  await sendMessage(env, chatId, `${intro}\n\n${helpText(isAdmin)}`, { reply_markup: menuKeyboard(isAdmin) });
 }
 
 /**
@@ -102,13 +125,13 @@ async function acceptInvite(env: Env, chatId: ChatId, user: TelegramUser, token:
   }
   // They got access in another way since handleMessage looked them up.
   if (res.existing) {
-    await sendMessage(env, chatId, `You're already on the team.\n\n${helpText(false)}`);
+    await sendMenu(env, chatId, false, "You're already on the team.");
     return;
   }
   const lines = [`👋 Welcome to the team, ${name}!`];
   if (res.invited_by?.name) lines.push(`${res.invited_by.name} invited you.`);
   if (res.communities.length > 0) lines.push(`Your communities: ${res.communities.join(", ")}.`);
-  await sendMessage(env, chatId, `${lines.join("\n")}\n\n${helpText(false)}`);
+  await sendMenu(env, chatId, false, lines.join("\n"));
   if (res.invited_by) {
     const who = user.username ? `${name} (@${user.username})` : name;
     await sendMessage(env, res.invited_by.telegram_id, `✅ ${who} joined the team with your invite link.`);
@@ -172,13 +195,29 @@ export async function processUpdate(env: Env, store: SessionStore, update: Teleg
   }
 }
 
+// Adds a Cancel button to a flow's keyboard, unless it has one or only has link buttons.
+function withCancel(keyboard: { inline_keyboard: InlineKeyboardButton[][] }) {
+  const buttons = keyboard.inline_keyboard.flat();
+  if (!buttons.some(b => "callback_data" in b) || buttons.some(b => /cancel/i.test(b.text))) return keyboard;
+  return { inline_keyboard: [...keyboard.inline_keyboard, [CANCEL_BUTTON]] };
+}
+
+// The pressed message with the text of the pressed button.
+type Press = PressedMessage & { label?: string };
+
 /**
  * Runs the step of session's flow for userId. The flow gets a sendMessage that
  * records the message_id of every message with buttons in the session, so only
- * buttons of the latest keyboard count (see handleButton). The last message is
- * held back until the flow is done: when the session is still open it is the
- * question for the next step and goes out through asQuestion. replyTo is the
- * user's message, absent when they pressed a button.
+ * buttons of the latest keyboard count (see handleButton), and adds a Cancel
+ * button to them. The last message is held back until the flow is done: when the
+ * session is still open it is the question for the next step and goes out
+ * through asQuestion. replyTo is the user's message, absent when they pressed a
+ * button; pressed is then the message with the button.
+ *
+ * When the flow answers with more than an error, the question the input answered
+ * is over: a pressed message shows the answer below its text and loses its buttons,
+ * and the buttons of a question answered by text go. Old questions in the chat so
+ * show what was chosen and offer nothing that no longer works.
  */
 async function runFlow(
   env: Env,
@@ -187,7 +226,8 @@ async function runFlow(
   userId: string,
   session: Session,
   text: string | undefined,
-  replyTo?: number
+  replyTo?: number,
+  pressed?: Press
 ) {
   const flow = session.mode && FLOWS[session.mode];
   if (!flow) {
@@ -195,7 +235,11 @@ async function runFlow(
     store.deleteSession(userId);
     return;
   }
+  const keyboardBefore = session.keyboard_message_id;
   let removed = false;
+  let answered = false;
+  // Whether a message replaced the pressed one (SendOptions.replace); it then needs no marking.
+  let replaced = false;
   const persistSession = async () => {
     removed = false;
     store.putSession(userId, session);
@@ -204,15 +248,33 @@ async function runFlow(
     removed = true;
     store.deleteSession(userId);
   };
-  const deliver = async (chatId: ChatId, text: string, options?: ApiSendOptions) => {
-    const messageId = await sendMessage(env, chatId, text, options);
-    if (options?.reply_markup && "inline_keyboard" in options.reply_markup && messageId !== undefined && !removed) {
+  const deliver = async (chatId: ChatId, text: string, options: ApiSendOptions = {}) => {
+    let keyboard = options.reply_markup && "inline_keyboard" in options.reply_markup ? options.reply_markup : undefined;
+    if (keyboard && !removed) {
+      keyboard = withCancel(keyboard);
+      options = { ...options, reply_markup: keyboard };
+    }
+    let messageId: number | undefined;
+    if (keyboard && options.replace && pressed && !replaced) {
+      if (await editMessage(env, chatId, pressed.messageId, text, { ...options, reply_markup: keyboard })) {
+        messageId = pressed.messageId;
+        replaced = true;
+      }
+    }
+    messageId ??= await sendMessage(env, chatId, text, options);
+    if (keyboard && messageId !== undefined && !removed) {
+      const previous = session.keyboard_message_id;
+      // An earlier question of this flow is over; a pressed one is marked answered at the end.
+      if (previous !== undefined && previous !== messageId && previous !== pressed?.messageId) {
+        await clearKeyboard(env, chatId, previous);
+      }
       session.keyboard_message_id = messageId;
       store.putSession(userId, session);
     }
   };
   let last: [ChatId, string, SendOptions | undefined] | undefined;
   const send: SendMessage = async (_env, chatId, text, options) => {
+    if (!isErrorMessage(text)) answered = true;
     if (last) await deliver(...last);
     last = [chatId, text, options];
   };
@@ -227,6 +289,110 @@ async function runFlow(
       else await deliver(chatId, text, options);
     }
   }
+  const answer = session.pressed_answer ?? pressed?.label;
+  if (session.pressed_answer !== undefined) {
+    delete session.pressed_answer;
+    if (!removed) store.putSession(userId, session);
+  }
+  if ((answered || removed) && keyboardBefore !== undefined && !replaced) {
+    if (pressed) await markAnswered(env, chatId, pressed, answer);
+    else if (removed || session.keyboard_message_id === keyboardBefore)
+      await clearKeyboard(env, chatId, keyboardBefore);
+    // Its buttons are gone; nothing to clear again later.
+    if (!removed && session.keyboard_message_id === keyboardBefore) {
+      delete session.keyboard_message_id;
+      store.putSession(userId, session);
+    }
+  }
+}
+
+// Who does something where: a team member in a chat, and their message (absent for a button).
+interface Actor {
+  chatId: ChatId;
+  userId: string;
+  member: TeamMember;
+  replyTo?: number;
+}
+
+/**
+ * Ends the user's flow, if they have one, and takes the buttons off its last question.
+ * Returns the command of the flow that was stopped.
+ */
+async function stopFlow(env: Env, store: SessionStore, chatId: ChatId, userId: string) {
+  const session = store.getSession(userId);
+  if (!session) return undefined;
+  store.deleteSession(userId);
+  if (session.keyboard_message_id !== undefined) await clearKeyboard(env, chatId, session.keyboard_message_id);
+  return session.mode ? FLOW_COMMANDS[session.mode] : undefined;
+}
+
+/**
+ * Starts session as the actor's flow, replacing any flow they had; they are told when one
+ * stopped. With prompt, that is the first question; otherwise the flow's first step asks it.
+ */
+async function startFlow(env: Env, store: SessionStore, actor: Actor, session: Session, prompt?: string) {
+  const { chatId, userId, replyTo } = actor;
+  const stopped = await stopFlow(env, store, chatId, userId);
+  const notice = stopped ? `ℹ️ Your unfinished ${stopped} was stopped.` : undefined;
+  store.putSession(userId, session);
+  if (prompt) {
+    await sendMessage(env, chatId, ...asQuestion(chatId, notice ? `${notice}\n\n${prompt}` : prompt, {}, replyTo));
+    return;
+  }
+  if (notice) await sendMessage(env, chatId, notice);
+  await runFlow(env, store, chatId, userId, session, undefined, replyTo);
+}
+
+/**
+ * Starts the flow of a command, typed or from a main menu button (menu:<command>). Returns
+ * false for a command that starts no flow.
+ */
+async function startCommandFlow(env: Env, store: SessionStore, actor: Actor, command: string) {
+  const owner = { created_by: actor.member.id, telegram_id: actor.userId };
+  switch (command) {
+    case "newcontact":
+      await startFlow(
+        env,
+        store,
+        actor,
+        { step: "awaiting_name", mode: "contact", ...owner },
+        "What is the contact name?"
+      );
+      return true;
+    case "neworg":
+      await startFlow(
+        env,
+        store,
+        actor,
+        { step: "awaiting_org_name", mode: "org", ...owner },
+        "What is the name of the organization?"
+      );
+      return true;
+    case "logconversation":
+      await startFlow(
+        env,
+        store,
+        actor,
+        { step: "awaiting_contact", mode: "conversation", ...owner },
+        "Which contact did you talk to? Type part of the name."
+      );
+      return true;
+    case "invite":
+    case "teammember":
+      if (actor.member.is_admin !== 1) {
+        await sendMessage(env, actor.chatId, ONLY_ADMINS);
+        return true;
+      }
+      // /invite is a shortcut into the invite steps of the team member flow.
+      await startFlow(env, store, actor, {
+        step: command === "invite" ? "invite_start" : "teammember_menu",
+        mode: "teammember",
+        ...owner
+      });
+      return true;
+    default:
+      return false;
+  }
 }
 
 async function handleButton(
@@ -234,8 +400,8 @@ async function handleButton(
   store: SessionStore,
   callback: NonNullable<TelegramUpdate["callback_query"]>
 ): Promise<UpdateResult> {
-  // Shown to the user as a short notice on the button instead of a chat message.
-  let notice: string | undefined;
+  // Shown to the user on the button instead of as a chat message.
+  let notice: Notice | undefined;
   try {
     const chatId = callback.message?.chat?.id;
     if (!chatId) return reply("Invalid input");
@@ -243,45 +409,78 @@ async function handleButton(
     const userId = String(callback.from.id);
     const member = await env.crmApi.validateUser(userId);
     if (!member) {
-      notice = NOT_AUTHORIZED_BUTTON;
+      notice = { text: NOT_AUTHORIZED_BUTTON };
       store.deleteSession(userId);
       return reply("Forbidden");
     }
     await syncUsername(env, member, callback.from);
+    const data = callback.data ?? "";
     // The spam button under an email that mail-to-tg posted; it belongs to no session.
-    if (callback.data?.startsWith("spam:")) {
-      notice = await (env.mailToTg as unknown as SpamButtons)
-        .press(callback.data, chatId, callback.message.message_id ?? 0)
-        .catch(e => {
+    if (data.startsWith("spam:")) {
+      const answer = await (env.mailToTg as unknown as SpamButtons)
+        .press(data, chatId, callback.message.message_id ?? 0)
+        .catch((e: unknown): Notice => {
           console.error("Spam button failed", e);
-          return SOMETHING_WENT_WRONG;
+          return { text: SOMETHING_WENT_WRONG, alert: true };
         });
+      notice = typeof answer === "string" ? { text: answer } : answer;
+      return reply("OK");
+    }
+    const actor = { chatId, userId, member };
+    // Main menu buttons work like the command, also on an old menu.
+    if (data.startsWith("menu:")) {
+      if (!(await startCommandFlow(env, store, actor, data.slice("menu:".length)))) notice = { text: STALE_BUTTON };
+      return reply("OK");
+    }
+    // "Log conversation with …" under a saved contact: the conversation steps for that contact.
+    if (data.startsWith("log:")) {
+      const contactId = Number(data.slice("log:".length));
+      await startFlow(env, store, actor, {
+        step: "log_contact",
+        mode: "conversation",
+        contact_id: contactId,
+        created_by: member.id,
+        telegram_id: userId
+      });
       return reply("OK");
     }
     const session = store.getSession(userId);
     if (!session) {
-      notice = EXPIRED_BUTTON;
+      notice = { text: EXPIRED_BUTTON };
       return reply("No active session");
     }
     // An older keyboard, or the same button tapped twice after the flow moved on.
     if (callback.message.message_id === undefined || callback.message.message_id !== session.keyboard_message_id) {
-      notice = STALE_BUTTON;
+      notice = { text: STALE_BUTTON };
       return reply("Stale button");
     }
+    const pressed: Press = {
+      messageId: callback.message.message_id,
+      text: callback.message.text,
+      entities: callback.message.entities,
+      reply_markup: callback.message.reply_markup
+    };
+    pressed.label = pressedLabel(pressed, callback.data);
+    if (data === "cancel") {
+      store.deleteSession(userId);
+      await markAnswered(env, chatId, pressed, "Cancelled");
+      notice = { text: "Cancelled." };
+      return reply("OK");
+    }
     if (session.mode === "teammember" && member.is_admin !== 1) {
-      notice = ONLY_ADMINS;
+      notice = { text: ONLY_ADMINS };
       store.deleteSession(userId);
       return reply("Forbidden");
     }
     session.last_callback_data = callback.data ?? null;
     store.putSession(userId, session);
-    await runFlow(env, store, chatId, userId, session, undefined);
+    await runFlow(env, store, chatId, userId, session, undefined, undefined, pressed);
     return reply("OK");
   } finally {
     // Telegram shows a spinner on the button until this is called.
     await callTelegram(env, "answerCallbackQuery", {
       callback_query_id: callback.id,
-      ...(notice ? { text: notice } : {})
+      ...(notice ? { text: notice.text, ...(notice.alert ? { show_alert: true } : {}) } : {})
     });
   }
 }
@@ -294,6 +493,7 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
   if (!message || !chatId || !userId || !text) {
     return reply("Invalid input");
   }
+  const user = message.from!;
   const isPrivate = message.chat?.type === "private";
 
   const command = await parseCommand(env, text);
@@ -303,8 +503,8 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
   const member = await env.crmApi.validateUser(userId);
   // An invite link opened: t.me/<bot>?start=inv_… arrives as /start inv_…
   if (command?.name === "start" && command.args.startsWith("inv_")) {
-    if (member) await sendMessage(env, chatId, `You're already on the team.\n\n${helpText(member.is_admin === 1)}`);
-    else await acceptInvite(env, chatId, message.from!, command.args);
+    if (member) await sendMenu(env, chatId, member.is_admin === 1, "You're already on the team.");
+    else await acceptInvite(env, chatId, user, command.args);
     return reply("OK");
   }
   if (!member) {
@@ -318,81 +518,55 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
       return reply("Forbidden");
     }
     // No team yet: whoever talks to the bot first becomes its first admin, under their Telegram name.
-    const name = profileName(message.from!) || userId;
+    const name = profileName(user) || userId;
     const res = await env.crmApi.firstUser({ telegram_id: userId, name });
-    await sendMessage(
-      env,
-      chatId,
-      res.ok
-        ? `👋 Welcome! You are the first team member, so you are an admin, registered as "${name}".\n\n${helpText(true)}`
-        : errorMessage("Registering you as the first team member failed. Please try again.")
-    );
+    if (res.ok) {
+      await sendMenu(
+        env,
+        chatId,
+        true,
+        `👋 Welcome! You are the first team member, so you are an admin, registered as "${name}".`
+      );
+    } else {
+      await sendMessage(
+        env,
+        chatId,
+        errorMessage("Registering you as the first team member failed. Please try again.")
+      );
+    }
     return reply("OK");
   }
-  await syncUsername(env, member, message.from!);
-  const createdBy = member.id;
+  await syncUsername(env, member, user);
   const isAdmin = member.is_admin === 1;
-
-  // Starts a new flow for this user, replacing any flow they had.
-  async function startFlow(newSession: Session, prompt: string) {
-    store.putSession(userId!, newSession);
-    await sendMessage(env, chatId!, ...asQuestion(chatId!, prompt, {}, message!.message_id));
-    return reply("OK");
-  }
+  await ensureCommandMenus(env, userId, isAdmin, isPrivate);
+  const actor = { chatId, userId, member, replyTo: message.message_id };
 
   if (command) {
-    const owner = { created_by: createdBy, telegram_id: userId };
     // The "Open private chat" button of /invite in a group opens t.me/<bot>?start=invite.
     const name = command.name === "start" && command.args === "invite" ? "invite" : command.name;
-    switch (name) {
-      case "start":
-      case "help": {
-        await sendMessage(env, chatId, helpText(isAdmin));
-        return reply("OK");
-      }
-      case "cancel":
-        store.deleteSession(userId);
-        await sendMessage(
-          env,
-          chatId,
-          "Active input has been cancelled. You can start again with /newcontact, /neworg, etc."
-        );
-        return reply("OK");
-      case "newcontact":
-        return startFlow({ step: "awaiting_name", mode: "contact", ...owner }, "What is the contact name?");
-      case "neworg":
-        return startFlow({ step: "awaiting_org_name", mode: "org", ...owner }, "What is the name of the organization?");
-      case "logconversation":
-        return startFlow(
-          { step: "awaiting_contact", mode: "conversation", ...owner },
-          "Which contact did you talk to? Type part of the name."
-        );
-      case "invite":
-      case "teammember": {
-        if (!isAdmin) {
-          await sendMessage(env, chatId, ONLY_ADMINS);
-          return reply("OK");
-        }
-        // /invite is a shortcut into the invite steps of the team member flow.
-        const flow: Session = {
-          step: name === "invite" ? "invite_start" : "teammember_menu",
-          mode: "teammember",
-          ...owner
-        };
-        store.putSession(userId, flow);
-        await runFlow(env, store, chatId, userId, flow, undefined, message.message_id);
-        return reply("OK");
-      }
-      default:
-        // Never hand a command to a flow as input, e.g. as the note of a conversation.
-        await sendMessage(env, chatId, "Unknown command. Type /help for available commands.");
-        return reply("Unknown command");
+    if (name === "start" || name === "help") {
+      const greeting = user.first_name ? `👋 Hi ${user.first_name}!` : "👋 Hi!";
+      await sendMenu(env, chatId, isAdmin, `${greeting} What do you want to do?`);
+      return reply("OK");
     }
+    if (name === "cancel") {
+      const stopped = await stopFlow(env, store, chatId, userId);
+      await sendMessage(
+        env,
+        chatId,
+        stopped ? `Your ${stopped} was cancelled.` : "There is nothing to cancel. Send /help to see what you can do."
+      );
+      return reply("OK");
+    }
+    if (await startCommandFlow(env, store, actor, name)) return reply("OK");
+    // Never hand a command to a flow as input, e.g. as the note of a conversation.
+    await sendMessage(env, chatId, "Unknown command. Type /help for available commands.");
+    return reply("Unknown command");
   }
 
   if (!session) {
     // In a group, ordinary chat between members is not meant for the bot.
-    if (isPrivate) await sendMessage(env, chatId, "Unknown input. Type /help for available commands.");
+    if (isPrivate) await sendMenu(env, chatId, isAdmin, "What do you want to do?");
     return reply("No active session");
   }
   if (session.mode === "teammember" && !isAdmin) {

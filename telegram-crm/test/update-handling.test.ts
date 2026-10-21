@@ -139,10 +139,14 @@ describe("input routing", () => {
     expect(sent[0].reply_markup).toBeUndefined();
   });
 
-  it("still answers ordinary text without a flow in a private chat", async () => {
+  it("answers ordinary text without a flow in a private chat with the main menu", async () => {
     await addAdmin(ADMIN);
     await chatAs(ADMIN).text("hello");
-    expect(lastText()).toBe("Unknown input. Type /help for available commands.");
+    expect(lastText()).toMatch(/^What do you want to do\?\n\nAvailable commands:/);
+    expect(JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard.flat()).toContainEqual({
+      text: "➕ New contact",
+      callback_data: "menu:newcontact"
+    });
   });
 });
 
@@ -209,7 +213,7 @@ describe("group chats", () => {
       "What is the email address of the contact? (optional)\n\n↩️ To type an answer, reply to this message."
     );
     expect(JSON.parse(question.reply_markup!)).toEqual({
-      inline_keyboard: [[{ text: "Skip", callback_data: "skip" }]]
+      inline_keyboard: [[{ text: "Skip", callback_data: "skip" }], [{ text: "✖️ Cancel", callback_data: "cancel" }]]
     });
   });
 
@@ -449,7 +453,14 @@ describe("spam button", () => {
     });
     vi.spyOn(console, "error").mockImplementation(() => {});
     await groupChat(MAIL_GROUP).as(ADMIN).press("spam:7:yes", { messageId: 321 });
-    expect(lastAnswer().text).toBe("Something went wrong. Please try again later.");
+    expect(lastAnswer()).toMatchObject({ text: "Something went wrong. Please try again later.", show_alert: true });
     expect(sent).toEqual([]);
+  });
+
+  it("shows a notice mail-to-tg marks as important in a box the user closes", async () => {
+    await addAdmin(ADMIN);
+    answerSpamButtons(async () => ({ text: "Delete it by hand.", alert: true }));
+    await groupChat(MAIL_GROUP).as(ADMIN).press("spam:7:yes", { messageId: 321 });
+    expect(lastAnswer()).toMatchObject({ text: "Delete it by hand.", show_alert: true });
   });
 });

@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import CrmApi from "../../crm-api/src/index";
-import { addAdmin, chatAs, resetAndStubFetch, sessionOf, type SentMessage } from "./harness";
+import { addAdmin, chatAs, lastKeyboardMessage, resetAndStubFetch, sessionOf, type SentMessage } from "./harness";
 
 const ADMIN = 5001;
 const NPUB = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
@@ -19,8 +19,9 @@ beforeEach(async () => {
   sent = await resetAndStubFetch();
 });
 const lastText = () => sent[sent.length - 1]?.text;
-const lastKeyboard = (): { text: string; callback_data: string }[][] =>
-  JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard;
+// The buttons of the newest message that still has them, without the Cancel row every flow gets.
+const lastKeyboard = () =>
+  lastKeyboardMessage(ADMIN)!.reply_markup!.inline_keyboard.filter(row => row[0].callback_data !== "cancel");
 
 // /newcontact up to "Which organization is this contact linked to?"
 async function toOrganizationStep(chat: ReturnType<typeof chatAs>, name: string) {
@@ -49,7 +50,7 @@ describe("audit repro: /neworg and the new organization of /newcontact", () => {
     await addAdmin(ADMIN);
     const chat = chatAs(ADMIN);
     await chat.text("/help");
-    expect(lastText()).toContain("/neworg - Add new organization");
+    expect(lastText()).toContain("/neworg - Add an organization");
     await chat.text("/neworg");
     await chat.text("Cafe Satoshi");
     expect(lastText()).not.toBe("Organization flow not implemented in this build.");
@@ -88,7 +89,7 @@ describe("/neworg", () => {
     await chat.press("choose_other");
     await chat.press("country:0");
     const community = lastKeyboard()[0][0];
-    await chat.press(community.callback_data);
+    await chat.press(community.callback_data!);
     await chat.press("done");
     const choice = sent[sent.length - 1];
     expect(choice.parse_mode).toBe("HTML");

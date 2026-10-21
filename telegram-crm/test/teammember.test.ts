@@ -1,6 +1,15 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { addAdmin, addMember, BOT_USERNAME, chatAs, groupChat, resetAndStubFetch, type SentMessage } from "./harness";
+import {
+  addAdmin,
+  addMember,
+  BOT_USERNAME,
+  chatAs,
+  groupChat,
+  lastKeyboardMessage,
+  resetAndStubFetch,
+  type SentMessage
+} from "./harness";
 
 const ADMIN = 5001;
 const MEMBER = 7001;
@@ -12,12 +21,11 @@ beforeEach(async () => {
 
 const lastText = () => sent[sent.length - 1]?.text;
 
-// Button texts of the last message with a keyboard, row by row.
+// Button texts of the newest message that still has buttons, row by row, without the Cancel
+// row every flow gets.
 function lastButtons(): string[] {
-  const withKeyboard = [...sent].reverse().find(m => m.reply_markup);
-  if (!withKeyboard) return [];
-  const keyboard: { text: string }[][] = JSON.parse(withKeyboard.reply_markup!).inline_keyboard;
-  return keyboard.map(row => row.map(b => b.text).join(" | "));
+  const keyboard = lastKeyboardMessage(ADMIN)?.reply_markup?.inline_keyboard ?? [];
+  return keyboard.filter(row => row[0].callback_data !== "cancel").map(row => row.map(b => b.text).join(" | "));
 }
 
 // The buttons of a message, with what they do.
@@ -119,7 +127,7 @@ describe("/teammember: remove team member", () => {
     await chat.press("remove_member");
     await chat.press(`member:${memberId}`);
     await chat.press("cancel_remove");
-    expect(lastText()).toBe("❌ Removal cancelled.");
+    expect(lastText()).toBe("Removal cancelled.");
     expect(await memberRow(memberId)).toMatchObject({ telegram_id: String(MEMBER) });
   });
 });
@@ -404,6 +412,7 @@ describe("/help", () => {
   it("lists the team member actions for admins", async () => {
     await addAdmin(ADMIN);
     await chatAs(ADMIN).text("/help");
-    expect(lastText()).toContain("/teammember - Manage team members (invite, edit, remove, admin rights)");
+    expect(lastText()).toContain("/teammember - Manage team members");
+    expect(lastText()).toContain("/invite - Make an invite link for a new team member");
   });
 });

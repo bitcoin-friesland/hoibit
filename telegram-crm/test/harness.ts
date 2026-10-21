@@ -2,6 +2,7 @@ import { createExecutionContext, env } from "cloudflare:test";
 import { vi } from "vitest";
 import CrmApi from "../../crm-api/src/index";
 import { storeFor } from "../src/chat";
+import { forgetCommandMenus } from "../src/helpers/menu";
 import { createSerialQueue } from "../src/helpers/queue";
 import worker from "../src/index";
 import { chatIdOf, processUpdate } from "../src/update";
@@ -14,8 +15,9 @@ export const BOT_USERNAME = "HoiBitBot";
 // crmApi binding; crm-api's own tests cover the real RPC stub.
 const crmApi = new CrmApi(createExecutionContext(), { DB: env.DB });
 // Stands in for mail-to-tg's SpamButtons; mail-to-tg's own tests cover the real one.
+type SpamAnswer = string | { text: string; alert?: boolean };
 let spamPresses: { data: string; chatId: number; messageId: number }[] = [];
-let spamAnswer: () => Promise<string> = async () => "Delete this email and block its sender?";
+let spamAnswer: () => Promise<SpamAnswer> = async () => "Delete this email and block its sender?";
 const mailToTg = {
   press: async (data: string, chatId: number, messageId: number) => {
     spamPresses.push({ data, chatId, messageId });
@@ -35,7 +37,7 @@ export function spamButtonPresses() {
 }
 
 // What mail-to-tg answers a spam button press with, until the next reset.
-export function answerSpamButtons(answer: () => Promise<string>) {
+export function answerSpamButtons(answer: () => Promise<SpamAnswer>) {
   spamAnswer = answer;
 }
 
@@ -63,6 +65,24 @@ export interface SentMessage {
 export interface CallbackAnswer {
   callback_query_id: string;
   text?: string;
+  show_alert?: boolean;
+}
+
+type Keyboard = { inline_keyboard: { text: string; callback_data?: string; url?: string }[][] };
+
+// A message the bot sent, as it looks now: edits change its text and buttons.
+export interface ChatMessage {
+  chat_id: number;
+  message_id: number;
+  text: string;
+  entities?: unknown[];
+  reply_markup?: Keyboard;
+}
+
+// A Bot API call other than sendMessage, such as editMessageText or setMyCommands.
+export interface TelegramCall {
+  method: string;
+  body: Record<string, unknown>;
 }
 
 // SyncKvStorage backed by a Map, standing in for a ChatSession's ctx.storage.kv.
@@ -79,8 +99,9 @@ export function memoryKv(): SyncKvStorage {
 
 // Per chat: its session store and its update queue, as the chat's Durable Object would have.
 let chats = new Map<number, { store: SessionStore; serial: ReturnType<typeof createSerialQueue> }>();
-// Per chat: the message id of the last message the bot sent with an inline keyboard.
-let keyboards = new Map<string, number>();
+// Every message the bot sent, by message id, as it looks after edits.
+let messages = new Map<number, ChatMessage>();
+let calls: TelegramCall[] = [];
 let answers: CallbackAnswer[] = [];
 let lastDelivered: { body: string; secret: string | null } | undefined;
 // One counter for update ids and message ids, so ids never collide.
@@ -93,8 +114,10 @@ const TELEGRAM_API = "https://api.telegram.org/bottest-token/";
 export async function resetAndStubFetch({ nominatim = [] as object[] } = {}): Promise<SentMessage[]> {
   await env.DB.batch(DATA_TABLES.map(table => env.DB.prepare(`DELETE FROM ${table}`)));
   chats = new Map();
-  keyboards = new Map();
+  messages = new Map();
+  calls = [];
   answers = [];
+  forgetCommandMenus();
   lastDelivered = undefined;
   spamPresses = [];
   spamAnswer = async () => "Delete this email and block its sender?";
@@ -105,12 +128,33 @@ export async function resetAndStubFetch({ nominatim = [] as object[] } = {}): Pr
     if (url.startsWith(TELEGRAM_API)) {
       const method = url.slice(TELEGRAM_API.length);
       const body = init?.body ? JSON.parse(String(init.body)) : {};
+      // sendMessage gets reply_markup as a JSON string, the edit methods as an object.
+      const markup = (value: unknown): Keyboard | undefined =>
+        typeof value === "string" ? JSON.parse(value) : (value as Keyboard | undefined);
       if (method === "sendMessage") {
         sent.push(body);
         const messageId = ++nextId;
-        if (body.reply_markup && JSON.parse(body.reply_markup).inline_keyboard)
-          keyboards.set(String(body.chat_id), messageId);
+        const keyboard = markup(body.reply_markup);
+        messages.set(messageId, {
+          chat_id: Number(body.chat_id),
+          message_id: messageId,
+          text: body.text,
+          ...(keyboard?.inline_keyboard ? { reply_markup: keyboard } : {})
+        });
         return Response.json({ ok: true, result: { message_id: messageId, chat: { id: body.chat_id }, date: 0 } });
+      }
+      calls.push({ method, body });
+      if (method === "editMessageText" || method === "editMessageReplyMarkup") {
+        const message = messages.get(body.message_id);
+        if (!message || String(message.chat_id) !== String(body.chat_id)) {
+          return Response.json({ ok: false, error_code: 400, description: "Bad Request: message to edit not found" });
+        }
+        if (method === "editMessageText") {
+          message.text = body.text;
+          message.entities = body.entities;
+        }
+        message.reply_markup = markup(body.reply_markup);
+        return Response.json({ ok: true, result: { message_id: message.message_id } });
       }
       if (method === "getMe") {
         return Response.json({
@@ -133,9 +177,26 @@ export function callbackAnswers(): CallbackAnswer[] {
   return answers;
 }
 
-// The message id of the last message with an inline keyboard the bot sent to this chat.
+// The Bot API calls of the current test other than sendMessage, in order.
+export function telegramCalls(method?: string): TelegramCall[] {
+  return method ? calls.filter(c => c.method === method) : calls;
+}
+
+// A message the bot sent, as it looks now.
+export function messageById(messageId: number) {
+  return messages.get(messageId);
+}
+
+// The newest message in the chat that still has buttons to press, as it looks now.
+export function lastKeyboardMessage(chatId: number): ChatMessage | undefined {
+  return [...messages.values()]
+    .filter(m => String(m.chat_id) === String(chatId) && m.reply_markup?.inline_keyboard.some(row => row.length > 0))
+    .at(-1);
+}
+
+// The message id of the newest message in the chat that still has buttons.
 export function lastKeyboardMessageId(chatId: number) {
-  return keyboards.get(String(chatId));
+  return lastKeyboardMessage(chatId)?.message_id;
 }
 
 function post(body: string, secret: string | null) {
@@ -189,17 +250,25 @@ function userIn(chat: Chat, userId: number, profile: Profile = {}) {
   return {
     text: (text: string, { secret }: { secret?: string | null } = {}) =>
       deliver({ message: { message_id: ++nextId, from: user, chat, date: 0, text } }, secret),
-    // Presses a button on message messageId; by default on the last message with a
-    // keyboard the bot sent to this chat (a fresh id when it sent none).
-    press: (data: string, { messageId }: { messageId?: number } = {}) =>
-      deliver({
+    // Presses a button on message messageId; by default on the newest message in this chat
+    // that still has buttons (a fresh id when there is none). Telegram sends the message along.
+    press: (data: string, { messageId }: { messageId?: number } = {}) => {
+      const id = messageId ?? lastKeyboardMessageId(chat.id) ?? ++nextId;
+      const message = messages.get(id);
+      return deliver({
         callback_query: {
           id: String(++nextId),
           from: user,
           data,
-          message: { message_id: messageId ?? keyboards.get(String(chat.id)) ?? ++nextId, chat, date: 0 }
+          message: {
+            message_id: id,
+            chat,
+            date: 0,
+            ...(message ? { text: message.text, entities: message.entities, reply_markup: message.reply_markup } : {})
+          }
         }
-      })
+      });
+    }
   };
 }
 
