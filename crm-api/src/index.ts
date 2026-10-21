@@ -2,9 +2,10 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import type {
   AcceptedInvite,
   AcceptInviteInput,
-  AddTeamMemberInput,
   Community,
+  ContactDetails,
   ContactSearchRow,
+  ConversationSummary,
   CreateInviteInput,
   DeleteTeamMemberInput,
   FirstUserInput,
@@ -13,6 +14,7 @@ import type {
   Lookup,
   NewContactInput,
   NewOrgInput,
+  OrganizationDetails,
   OrganizationSearch,
   OrganizationSearchRow,
   Refusal,
@@ -23,6 +25,8 @@ import type {
   TeamMember,
   TeamMemberSummary,
   TelegramId,
+  UpdateContactInput,
+  UpdateOrgInput,
   UpdateTeamMemberInput
 } from "./types";
 
@@ -181,77 +185,6 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       return refuse(409, "First user registration not allowed: team members already exist");
     }
     return { ok: true, id: lastId(results) };
-  }
-
-  // Adds a team member, or adds communities (and time zone) to an existing one.
-  async addTeamMember(data: AddTeamMemberInput): Promise<Result<{ id: number; created?: true; existing?: true }>> {
-    if (!data.telegram_id || !data.name) return refuse(400, "Missing telegram_id or name");
-    if (!(await this.isAdmin(data.invited_by))) return refuse(403, "Only admins can add team members");
-    const communityIds = (data.community_ids ?? []).map(toInt);
-    const existing = await this.db
-      .prepare(`SELECT id, time_zone FROM team_members WHERE telegram_id = ?`)
-      .bind(String(data.telegram_id))
-      .first<{ id: number; time_zone: string | null }>();
-    if (existing) {
-      // One transaction: only the real changes, and an audit entry for them.
-      const oldIds = await this.memberCommunityIds(existing.id);
-      const addedIds = sortedIds(communityIds).filter(id => !oldIds.includes(id));
-      const changedFields: Record<string, Change> = {};
-      const statements = addedIds.map(communityId =>
-        this.db
-          .prepare(`INSERT OR IGNORE INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`)
-          .bind(existing.id, communityId)
-      );
-      if (addedIds.length > 0) changedFields.community_ids = { old: oldIds, new: sortedIds([...oldIds, ...addedIds]) };
-      if (data.time_zone && data.time_zone !== existing.time_zone) {
-        statements.push(
-          this.db.prepare(`UPDATE team_members SET time_zone = ? WHERE id = ?`).bind(data.time_zone, existing.id)
-        );
-        changedFields.time_zone = { old: existing.time_zone, new: data.time_zone };
-      }
-      if (statements.length > 0) {
-        statements.push(
-          this.db
-            .prepare(auditSql())
-            .bind(
-              "update",
-              "team_members",
-              String(existing.id),
-              toIntOrNull(data.invited_by),
-              JSON.stringify({ fields: changedFields })
-            )
-        );
-        await this.db.batch(statements);
-      }
-      return { ok: true, id: existing.id, existing: true };
-    }
-    const memberIdSql = lastIdSql("team_members");
-    const timeZone = data.time_zone || null;
-    const results = await this.db.batch([
-      this.db
-        .prepare(`INSERT INTO team_members (telegram_id, name, time_zone) VALUES (?, ?, ?)`)
-        .bind(String(data.telegram_id), data.name, timeZone),
-      ...communityIds.map(communityId =>
-        this.db
-          .prepare(`INSERT INTO team_member_communities (team_member_id, community_id) VALUES (${memberIdSql}, ?)`)
-          .bind(communityId)
-      ),
-      this.db.prepare(auditSql(insertedIdText("team_members"))).bind(
-        "insert",
-        "team_members",
-        toIntOrNull(data.invited_by),
-        JSON.stringify({
-          fields: {
-            telegram_id: created(data.telegram_id),
-            name: created(data.name),
-            ...(timeZone ? { time_zone: created(timeZone) } : {}),
-            ...(communityIds.length > 0 ? { community_ids: created(communityIds) } : {})
-          }
-        })
-      ),
-      this.db.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'team_members'`)
-    ]);
-    return { ok: true, id: lastId(results), created: true };
   }
 
   // Creates a one-time invite link for a new team member, who will join the given communities.
@@ -537,15 +470,17 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     const oldIds = await this.memberCommunityIds(memberId);
     const lastAdmin = refuse(409, "Cannot delete the last admin");
 
-    // audit_log.performed_by and conversations.created_by reference team_members(id) and the
-    // history is kept, so such a member cannot be deleted. Clearing telegram_id ends their
-    // access (validateUser no longer finds them) while the row keeps the history readable.
+    // audit_log.performed_by, conversations.created_by and team_invites.invited_by/used_by
+    // reference team_members(id) and the history is kept, so such a member cannot be deleted.
+    // Clearing telegram_id ends their access (validateUser no longer finds them) while the row
+    // keeps the history readable.
     const history = await this.db
       .prepare(
         `SELECT EXISTS (SELECT 1 FROM audit_log WHERE performed_by = ?)
-             OR EXISTS (SELECT 1 FROM conversations WHERE created_by = ?) AS found`
+             OR EXISTS (SELECT 1 FROM conversations WHERE created_by = ?)
+             OR EXISTS (SELECT 1 FROM team_invites WHERE invited_by = ? OR used_by = ?) AS found`
       )
-      .bind(memberId, memberId)
+      .bind(memberId, memberId, memberId, memberId)
       .first<{ found: 0 | 1 }>();
     if (history?.found) {
       // One transaction: deactivate unless last admin, audit only that change, then drop the
@@ -766,6 +701,179 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       .first<ContactSearchRow>();
   }
 
+  // A contact with its details and its most recent conversations; null when it does not exist.
+  async contactDetails(id: RowId, conversations = 5): Promise<ContactDetails | null> {
+    const contactId = toInt(id);
+    const [contact, emails, phones, recent] = await this.db.batch([
+      this.db
+        .prepare(
+          `SELECT c.id, c.name, c.type, ct.label AS type_label, c.organization_id, o.name AS organization_name,
+                  c.nostr_npub
+           FROM contacts c
+           LEFT JOIN contact_types ct ON ct.id = c.type
+           LEFT JOIN organizations o ON o.id = c.organization_id
+           WHERE c.id = ?`
+        )
+        .bind(contactId),
+      this.db.prepare(`SELECT email FROM contact_emails WHERE contact_id = ? ORDER BY id`).bind(contactId),
+      this.db.prepare(`SELECT phone FROM contact_phones WHERE contact_id = ? ORDER BY id`).bind(contactId),
+      this.db.prepare(conversationsSql("conv.contact_id = ?")).bind(contactId, conversations)
+    ]);
+    const row = contact.results[0] as Omit<ContactDetails, "emails" | "phones" | "conversations"> | undefined;
+    if (!row) return null;
+    return {
+      ...row,
+      emails: (emails.results as { email: string }[]).map(e => e.email),
+      phones: (phones.results as { phone: string }[]).map(p => p.phone),
+      conversations: recent.results as ConversationSummary[]
+    };
+  }
+
+  // An organization with its details, contacts and the most recent conversations with any of
+  // them; null when it does not exist.
+  async organizationDetails(id: RowId, conversations = 5): Promise<OrganizationDetails | null> {
+    const orgId = toInt(id);
+    const [org, communities, contacts, recent] = await this.db.batch([
+      this.db
+        .prepare(
+          `SELECT o.id, o.name, o.status, s.label AS status_label, o.website, o.nostr_npub, o.location_osm_id
+           FROM organizations o LEFT JOIN organization_statuses s ON s.id = o.status
+           WHERE o.id = ?`
+        )
+        .bind(orgId),
+      this.db
+        .prepare(
+          `SELECT bc.name FROM organization_communities oc JOIN bitcoin_communities bc ON bc.id = oc.community_id
+           WHERE oc.organization_id = ? ORDER BY bc.name`
+        )
+        .bind(orgId),
+      this.db
+        .prepare(`SELECT id, name FROM contacts WHERE organization_id = ? ORDER BY name COLLATE NOCASE, id`)
+        .bind(orgId),
+      this.db.prepare(conversationsSql("c.organization_id = ?")).bind(orgId, conversations)
+    ]);
+    const row = org.results[0] as Omit<OrganizationDetails, "communities" | "contacts" | "conversations"> | undefined;
+    if (!row) return null;
+    return {
+      ...row,
+      communities: (communities.results as { name: string }[]).map(c => c.name),
+      contacts: contacts.results as { id: number; name: string }[],
+      conversations: recent.results as ConversationSummary[]
+    };
+  }
+
+  // One transaction: only the real changes and their audit entry; nothing when nothing changes.
+  async updateContact(data: UpdateContactInput): Promise<Result<{ changed: boolean }>> {
+    if (!data.contact_id) return refuse(400, "Missing contact_id");
+    if (data.name !== undefined && !data.name.trim()) return refuse(400, "The name cannot be empty");
+    const phone = data.phone ? normalizePhone(data.phone) : null;
+    if (phone === undefined) return refuse(400, "Phone number must be international, e.g. +31612345678");
+    const contactId = toInt(data.contact_id);
+    const [contact, email, oldPhone] = await this.db.batch([
+      this.db.prepare(`SELECT name, nostr_npub FROM contacts WHERE id = ?`).bind(contactId),
+      this.db
+        .prepare(`SELECT id, email AS value FROM contact_emails WHERE contact_id = ? ORDER BY id LIMIT 1`)
+        .bind(contactId),
+      this.db
+        .prepare(`SELECT id, phone AS value FROM contact_phones WHERE contact_id = ? ORDER BY id LIMIT 1`)
+        .bind(contactId)
+    ]);
+    const old = contact.results[0] as { name: string; nostr_npub: string | null } | undefined;
+    if (!old) return refuse(404, "Contact not found");
+
+    const { statements, fields } = this.columnUpdates("contacts", contactId, old, {
+      name: data.name?.trim(),
+      nostr_npub: data.nostr_npub === undefined ? undefined : data.nostr_npub || null
+    });
+    const details: [string, Detail | undefined, string | null | undefined][] = [
+      ["email", email.results[0] as Detail | undefined, data.email === undefined ? undefined : data.email || null],
+      ["phone", oldPhone.results[0] as Detail | undefined, data.phone === undefined ? undefined : phone]
+    ];
+    for (const [column, current, value] of details) {
+      if (value === undefined || value === (current?.value ?? null)) continue;
+      const table = `contact_${column}s`;
+      statements.push(
+        !current
+          ? this.db.prepare(`INSERT INTO ${table} (contact_id, ${column}) VALUES (?, ?)`).bind(contactId, value)
+          : value === null
+            ? this.db.prepare(`DELETE FROM ${table} WHERE id = ?`).bind(current.id)
+            : this.db.prepare(`UPDATE ${table} SET ${column} = ? WHERE id = ?`).bind(value, current.id)
+      );
+      fields[column] = { old: current?.value ?? null, new: value };
+    }
+    return this.applyUpdate("contacts", contactId, data.updated_by, statements, fields);
+  }
+
+  // One transaction: only the real changes and their audit entry; nothing when nothing changes.
+  async updateOrg(data: UpdateOrgInput): Promise<Result<{ changed: boolean }>> {
+    if (!data.organization_id) return refuse(400, "Missing organization_id");
+    if (data.name !== undefined && !data.name.trim()) return refuse(400, "The name cannot be empty");
+    const orgId = toInt(data.organization_id);
+    const status = data.status === undefined ? undefined : toInt(data.status);
+    const row = await this.db
+      .prepare(
+        `SELECT name, status, website, nostr_npub,
+                EXISTS (SELECT 1 FROM organization_statuses WHERE id = ?) AS known_status
+         FROM organizations WHERE id = ?`
+      )
+      .bind(status ?? null, orgId)
+      .first<{
+        name: string;
+        status: number | null;
+        website: string | null;
+        nostr_npub: string | null;
+        known_status: 0 | 1;
+      }>();
+    if (!row) return refuse(404, "Organization not found");
+    if (status !== undefined && !row.known_status) return refuse(400, "Unknown status");
+    const { known_status: _, ...old } = row;
+    const { statements, fields } = this.columnUpdates("organizations", orgId, old, {
+      name: data.name?.trim(),
+      status,
+      website: data.website === undefined ? undefined : data.website || null,
+      nostr_npub: data.nostr_npub === undefined ? undefined : data.nostr_npub || null
+    });
+    return this.applyUpdate("organizations", orgId, data.updated_by, statements, fields);
+  }
+
+  // An UPDATE of the columns whose new value (not undefined) differs from the old one, if any.
+  private columnUpdates(
+    table: "contacts" | "organizations",
+    id: number,
+    old: Record<string, unknown>,
+    updates: Record<string, string | number | null | undefined>
+  ) {
+    const fields: Record<string, Change> = {};
+    for (const [column, value] of Object.entries(updates)) {
+      if (value !== undefined && value !== old[column]) fields[column] = { old: old[column], new: value };
+    }
+    const columns = Object.keys(fields);
+    const statements: D1PreparedStatement[] =
+      columns.length === 0
+        ? []
+        : [
+            this.db
+              .prepare(`UPDATE ${table} SET ${columns.map(c => `${c} = ?`).join(", ")} WHERE id = ?`)
+              .bind(...columns.map(c => fields[c].new), id)
+          ];
+    return { statements, fields };
+  }
+
+  private async applyUpdate(
+    table: string,
+    id: number,
+    updatedBy: RowId | null | undefined,
+    statements: D1PreparedStatement[],
+    fields: Record<string, Change>
+  ): Promise<Result<{ changed: boolean }>> {
+    if (statements.length === 0) return { ok: true, changed: false };
+    statements.push(
+      this.db.prepare(auditSql()).bind("update", table, String(id), toIntOrNull(updatedBy), JSON.stringify({ fields }))
+    );
+    await this.db.batch(statements);
+    return { ok: true, changed: true };
+  }
+
   // One transaction: the new organization (if given), contact, email, phone and audit entries.
   async newContact(data: NewContactInput): Promise<Result<{ id: number; organization_id: number | null }>> {
     if (!data.name || !data.type) return refuse(400, "Missing required fields: name or type");
@@ -913,6 +1021,25 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return { ok: true, id: lastId(results) };
   }
 }
+
+// The first email address or phone number of a contact.
+type Detail = { id: number; value: string };
+
+// Conversations with their channel label, contact, and when and by whom they were logged (from
+// the audit entry when created_by is empty), the most recent first. Binds where's parameters and
+// the limit.
+const conversationsSql = (where: string) => `
+  SELECT conv.id, conv.contact_id, c.name AS contact_name, COALESCE(ch.label, conv.channel) AS channel, conv.note,
+         a.timestamp AS logged_at, tm.name AS logged_by
+  FROM conversations conv
+  JOIN contacts c ON c.id = conv.contact_id
+  LEFT JOIN channels ch ON ch.id = conv.channel
+  LEFT JOIN audit_log a
+    ON a.table_name = 'conversations' AND a.action = 'insert' AND a.record_id = CAST(conv.id AS TEXT)
+  LEFT JOIN team_members tm ON tm.id = COALESCE(conv.created_by, a.performed_by)
+  WHERE ${where}
+  ORDER BY conv.id DESC
+  LIMIT ?`;
 
 // The first row of the batch's last statement.
 function lastRow<T>(results: D1Result[]): T {
