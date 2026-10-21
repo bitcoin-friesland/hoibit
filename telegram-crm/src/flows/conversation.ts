@@ -1,11 +1,13 @@
 import { isValidNote } from "../helpers/validation";
 import { setStep } from "../helpers/session";
 import { errorMessage, successMessage } from "../helpers/messaging";
+import { handleContactFlow } from "./contact";
 import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
 
 const CONTACT_MAX_RESULTS = 8;
-
-const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+// Contacts the member added or talked to lately, offered when /logconversation starts.
+const RECENT_MAX_RESULTS = 5;
+const CONTACT_PROMPT = "Which contact did you talk to? Type part of the name.";
 
 // How a contact is named in this flow: with their organization, which tells equal names apart.
 const contactLabel = (c: { name: string; organization_name: string | null }) =>
@@ -25,7 +27,8 @@ async function askChannel(
   try {
     channels = await env.crmApi.channels();
   } catch (e) {
-    await sendMessage(env, chatId, errorMessage(`Error loading channels: ${errorText(e)}`));
+    console.error("Loading channels failed", e);
+    await sendMessage(env, chatId, errorMessage("Something went wrong. Please choose the contact again."));
     return;
   }
   session.contact_id = contactId;
@@ -49,13 +52,37 @@ export const handleConversationFlow: FlowHandler = async (
   removeSession = async () => {}
 ) => {
   switch (session.step) {
+    case "conversation_start": {
+      let recent: { id: number; name: string; organization_name: string | null }[] = [];
+      try {
+        recent = await env.crmApi.recentContacts(session.created_by ?? 0, RECENT_MAX_RESULTS);
+      } catch (e) {
+        // Typing the name still works.
+        console.error("Loading recent contacts failed", e);
+      }
+      session.contact_choices = Object.fromEntries(recent.map(c => [String(c.id), contactLabel(c)]));
+      setStep(session, "awaiting_contact");
+      await persistSession();
+      if (recent.length === 0) {
+        await sendMessage(env, chatId, CONTACT_PROMPT);
+        return;
+      }
+      await sendMessage(env, chatId, `${CONTACT_PROMPT}\nOr tap one you added or talked to recently:`, {
+        reply_markup: {
+          inline_keyboard: recent.map(c => [{ text: contactLabel(c), callback_data: `select_contact:${c.id}` }])
+        },
+        accepts_text: true
+      });
+      break;
+    }
     case "log_contact": {
       // Started from a "Log conversation with …" button, so the contact is known.
       let contact;
       try {
         contact = await env.crmApi.getContact(session.contact_id ?? 0);
       } catch (e) {
-        await sendMessage(env, chatId, errorMessage(`Error loading the contact: ${errorText(e)}`));
+        console.error("Loading a contact failed", e);
+        await sendMessage(env, chatId, errorMessage("Something went wrong. Please try again."));
         await removeSession();
         return;
       }
@@ -70,6 +97,21 @@ export const handleConversationFlow: FlowHandler = async (
     case "awaiting_contact": {
       // last_callback_data stays set until the next step, so only read it for a button press.
       const cb = text === undefined ? session.last_callback_data : null;
+      // "Add as a new contact" after a name that found nothing: /newcontact with that name.
+      if (cb === "add_contact" && session.pending_contact_name) {
+        const name = session.pending_contact_name;
+        const contact: Session = {
+          mode: "contact",
+          step: "awaiting_name",
+          created_by: session.created_by,
+          telegram_id: session.telegram_id,
+          keyboard_message_id: session.keyboard_message_id
+        };
+        for (const key of Object.keys(session) as (keyof Session)[]) delete session[key];
+        Object.assign(session, contact);
+        await handleContactFlow(sendMessage, env, chatId, name, session, persistSession, removeSession);
+        return;
+      }
       if (cb && cb.startsWith("select_contact:")) {
         const contactId = cb.slice("select_contact:".length);
         const label = session.contact_choices && session.contact_choices[contactId];
@@ -88,11 +130,14 @@ export const handleConversationFlow: FlowHandler = async (
       try {
         const contacts = await env.crmApi.searchContacts(name);
         if (contacts.length === 0) {
-          await sendMessage(
-            env,
-            chatId,
-            `No contact found with the name "${name}". Type another name, or add the contact first with /newcontact.`
-          );
+          session.pending_contact_name = name;
+          await persistSession();
+          await sendMessage(env, chatId, `No contact found with the name "${name}". Type another name, or add them:`, {
+            reply_markup: {
+              inline_keyboard: [[{ text: `➕ Add "${name}" as a new contact`, callback_data: "add_contact" }]]
+            },
+            accepts_text: true
+          });
           return;
         }
         const shown = contacts.slice(0, CONTACT_MAX_RESULTS);
@@ -112,7 +157,8 @@ export const handleConversationFlow: FlowHandler = async (
           accepts_text: more !== ""
         });
       } catch (e) {
-        await sendMessage(env, chatId, errorMessage(`Error searching contacts: ${errorText(e)}`));
+        console.error("Searching contacts failed", e);
+        await sendMessage(env, chatId, errorMessage("Searching contacts failed. Please type the name again."));
       }
       break;
     }
@@ -130,11 +176,13 @@ export const handleConversationFlow: FlowHandler = async (
       break;
     }
     case "awaiting_note": {
-      const note = text && text.trim();
+      // Try again after a failed save uses the note that was typed then.
+      const note = text === undefined && session.last_callback_data === "retry" ? session.note : text && text.trim();
       if (!isValidNote(note)) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid note (minimum 5 characters)."));
+        await sendMessage(env, chatId, errorMessage("Please write at least 5 characters about the conversation."));
         return;
       }
+      let saved = false;
       try {
         // created_by is the team member id (team_members.id) of the user, not the Telegram user id.
         const res = await env.crmApi.logConversation({
@@ -143,14 +191,17 @@ export const handleConversationFlow: FlowHandler = async (
           note,
           created_by: session.created_by || null
         });
-        if (!res.ok) {
-          await sendMessage(env, chatId, errorMessage(`Failed to log conversation (code ${res.status}).`));
-          await removeSession();
-          return;
-        }
+        if (!res.ok) console.error("Logging a conversation was refused", res);
+        saved = res.ok;
       } catch (e) {
-        await sendMessage(env, chatId, errorMessage(`Error logging conversation: ${errorText(e)}`));
-        await removeSession();
+        console.error("Logging a conversation failed", e);
+      }
+      if (!saved) {
+        session.note = note;
+        await persistSession();
+        await sendMessage(env, chatId, errorMessage("Saving failed, nothing was saved. Your note is kept."), {
+          reply_markup: { inline_keyboard: [[{ text: "🔁 Try again", callback_data: "retry" }]] }
+        });
         return;
       }
       const channelLabel = session.channel_choices?.[session.channel ?? ""] ?? session.channel;

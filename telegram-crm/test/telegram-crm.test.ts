@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import CrmApi from "../../crm-api/src/index";
 import { escapeForOverpass } from "../src/helpers/osm";
 import {
   addAdmin,
@@ -215,12 +216,10 @@ describe("/logconversation", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/logconversation");
     await chat.text("zed");
-    expect(lastText()).toBe(
-      'No contact found with the name "zed". Type another name, or add the contact first with /newcontact.'
-    );
-    // No list was shown, so a contact button can only be an old one.
+    expect(lastText()).toBe('No contact found with the name "zed". Type another name, or add them:');
+    // A contact button of an older message no longer counts.
     const before = sent.length;
-    await chat.press(`select_contact:${contactId}`);
+    await chat.press(`select_contact:${contactId}`, { messageId: 1 });
     expect(sent).toHaveLength(before);
     expect(callbackAnswers().at(-1)).toMatchObject({ text: "This button is no longer active." });
     await chat.text("alice");
@@ -231,6 +230,78 @@ describe("/logconversation", () => {
     expect(lastText()).toBe("❌ Please choose a channel from the buttons.");
     const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM conversations").first();
     expect(count).toEqual({ n: 0 });
+  });
+});
+
+describe("/logconversation, quicker", () => {
+  async function addContact(name: string, createdBy: number) {
+    const res = await env.DB.prepare("INSERT INTO contacts (name, type) VALUES (?, 'consumer') RETURNING id")
+      .bind(name)
+      .first<number>("id");
+    await env.DB.prepare(
+      "INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES ('insert', 'contacts', ?, ?, '{}')"
+    )
+      .bind(String(res), createdBy)
+      .run();
+    return res!;
+  }
+
+  it("offers the contacts the member added recently, most recent first", async () => {
+    const adminId = await addAdmin(ADMIN);
+    await addContact("Anna", adminId);
+    const bram = await addContact("Bram", adminId);
+    const chat = chatAs(ADMIN);
+    await chat.text("/logconversation");
+    expect(lastText()).toBe(
+      "Which contact did you talk to? Type part of the name.\nOr tap one you added or talked to recently:"
+    );
+    expect(
+      lastKeyboardMessage(ADMIN)!
+        .reply_markup!.inline_keyboard.slice(0, 2)
+        .map(row => row[0].text)
+    ).toEqual(["Bram", "Anna"]);
+    await chat.press(`select_contact:${bram}`);
+    expect(lastText()).toBe("How did you talk to Bram?");
+  });
+
+  it("adds a contact that was not found, then offers to log the conversation", async () => {
+    await addAdmin(ADMIN);
+    const chat = chatAs(ADMIN);
+    await chat.text("/logconversation");
+    await chat.text("Zoë");
+    await chat.press("add_contact");
+    expect(lastText()).toBe("Is Zoë a consumer or an entrepreneur?");
+    await chat.press("consumer");
+    await chat.press("card:save");
+    expect(lastText()).toBe('✅ Contact "Zoë" added.');
+    expect(
+      lastKeyboardMessage(ADMIN)!
+        .reply_markup!.inline_keyboard.flat()
+        .map(b => b.text)
+    ).toEqual(["💬 Log conversation with Zoë"]);
+  });
+
+  it("keeps the note when saving fails, for Try again", async () => {
+    const adminId = await addAdmin(ADMIN);
+    const contactId = await addContact("Anna", adminId);
+    const chat = chatAs(ADMIN);
+    await chat.text("/logconversation");
+    await chat.press(`select_contact:${contactId}`);
+    await chat.press("channel:phone");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const spy = vi.spyOn(CrmApi.prototype, "logConversation").mockRejectedValue(new Error("D1_ERROR: unavailable"));
+    try {
+      await chat.text("Wants a Lightning terminal");
+      expect(lastText()).toBe("❌ Saving failed, nothing was saved. Your note is kept.");
+    } finally {
+      spy.mockRestore();
+      error.mockRestore();
+    }
+    await chat.press("retry");
+    expect(lastText()).toBe("✅ Conversation with Anna (Phone) logged.");
+    expect(await env.DB.prepare("SELECT note FROM conversations").first()).toEqual({
+      note: "Wants a Lightning terminal"
+    });
   });
 });
 
