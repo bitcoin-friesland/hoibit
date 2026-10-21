@@ -1,6 +1,6 @@
 /**
  * Looks up an organization in OpenStreetMap: Overpass by phone, email and website,
- * Nominatim by name (and region). Results from both are merged and ranked.
+ * Nominatim by name (once per region). Results from both are merged, deduplicated and ranked.
  */
 
 export interface OsmResult {
@@ -33,8 +33,8 @@ type MatchType = "phone" | "email" | "website" | "name" | "other";
 
 export interface OrganizationQuery {
   name: string;
-  // e.g. province or city
-  region?: string | null;
+  // e.g. provinces or cities; Nominatim is searched once per region, or once without a region if empty
+  regions?: string[];
   // format: +31 ...
   phone?: string | null;
   website?: string | null;
@@ -68,7 +68,18 @@ interface OverpassElement {
 const USER_AGENT = "crm-btc/1.0 (contact@btc.com)";
 const OSM_KEYS = "shop amenity office craft industrial tourism leisure healthcare religion farm landuse".split(" ");
 
-let lastOverpassRequest = 0;
+// Nominatim's usage policy allows at most 1 request per second. Each caller reserves the next free
+// slot synchronously, so calls are spaced by NOMINATIM_INTERVAL_MS even when they start at the same
+// time. This holds within one isolate; separate isolates do not share it.
+const NOMINATIM_INTERVAL_MS = 1000;
+let nextNominatimSlot = 0;
+
+async function waitForNominatimSlot() {
+  const now = Date.now();
+  const slot = Math.max(now, nextNominatimSlot);
+  nextNominatimSlot = slot + NOMINATIM_INTERVAL_MS;
+  if (slot > now) await new Promise(resolve => setTimeout(resolve, slot - now));
+}
 
 // OSM type tags worth showing (landuse only when it is farmland).
 function extraFields(tags: Record<string, unknown> | undefined, item: Record<string, unknown>) {
@@ -107,6 +118,7 @@ async function searchNominatimByNameAndRegion(name: string, region?: string | nu
   url.searchParams.set("limit", "10");
   url.searchParams.set("namedetails", "1");
 
+  await waitForNominatimSlot();
   const res = await fetchWithTimeout(url.toString(), { headers: { "User-Agent": USER_AGENT } });
   if (!res || !res.ok) {
     if (res) console.debug("[OSM DEBUG] Nominatim fetch failed:", res.status, res.statusText);
@@ -145,7 +157,8 @@ async function searchOverpass({ phone, website, email }: OrganizationQuery): Pro
   if (phone) {
     const phoneFields = ["phone", "contact:phone", "telephone", "contact:mobile", "mobile"];
     for (const variant of generatePhoneVariants(phone)) {
-      for (const field of phoneFields) queries.push(`node["${field}"~"${variant}"];`);
+      const pattern = toOverpassString(variant);
+      for (const field of phoneFields) queries.push(`node["${field}"~"${pattern}"];`);
     }
   }
   for (const [key, value] of [
@@ -220,30 +233,34 @@ out body;
   });
 }
 
+// Searches Nominatim by name for each region in turn; waitForNominatimSlot spaces the requests.
+async function searchNominatimByName(name: string, regions: (string | null)[]): Promise<OsmResult[]> {
+  const results: OsmResult[] = [];
+  for (const region of regions) results.push(...(await searchNominatimByNameAndRegion(name, region)));
+  return results;
+}
+
 export async function findOsmNodeForOrganization(query: OrganizationQuery): Promise<OsmResult[]> {
-  const { name, region, phone, website, email } = query;
-  // Throttle: ensure at least 1s between Overpass requests
-  const wait = 1000 - (Date.now() - lastOverpassRequest);
-  if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
-  lastOverpassRequest = Date.now();
+  const { name, phone, website, email } = query;
+  const regions = query.regions && query.regions.length > 0 ? [...new Set(query.regions)] : [null];
 
-  // 1. Search by phone, email, website via Overpass
-  const overpassResults = await searchOverpass(query);
+  // 1. Phone, email and website via Overpass (once: the query does not depend on the region),
+  //    alongside 2. name via Nominatim, one region after another.
+  const [overpassResults, nominatimFound] = await Promise.all([
+    searchOverpass(query),
+    name ? searchNominatimByName(name, regions) : Promise.resolve([])
+  ]);
+  const nominatimResults = nominatimFound.map(item => {
+    const matchTypes: MatchType[] = ["name"];
+    if (phone && matchesAnyPhoneVariant(item.phone, phone)) matchTypes.push("phone");
+    if (email && item.email && item.email.toLowerCase() === email.toLowerCase()) matchTypes.push("email");
+    if (website && item.website && normalizeUrl(item.website) === normalizeUrl(website)) {
+      matchTypes.push("website");
+    }
+    return { ...item, matchTypes };
+  });
 
-  // 2. Search by name (and region) via Nominatim
-  const nominatimResults = name
-    ? (await searchNominatimByNameAndRegion(name, region)).map(item => {
-        const matchTypes: MatchType[] = ["name"];
-        if (phone && matchesAnyPhoneVariant(item.phone, phone)) matchTypes.push("phone");
-        if (email && item.email && item.email.toLowerCase() === email.toLowerCase()) matchTypes.push("email");
-        if (website && item.website && normalizeUrl(item.website) === normalizeUrl(website)) {
-          matchTypes.push("website");
-        }
-        return { ...item, matchTypes };
-      })
-    : [];
-
-  // 3. Combine results by id, merging matchTypes
+  // 3. Combine results by id (the same place can come from Overpass and from several regions), merging matchTypes
   const combined = new Map<string, OsmResult>();
   for (const item of overpassResults) combined.set(item.id, { ...item });
   for (const item of nominatimResults) {
@@ -286,8 +303,7 @@ function normalizeUrl(url: string) {
 // Matches value literally inside a double-quoted Overpass regex: escape the regex
 // metacharacters, then escape backslashes and quotes for the Overpass string.
 export function escapeForOverpass(value: string) {
-  const regex = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return regex.replace(/[\\"]/g, "\\$&");
+  return toOverpassString(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 }
 
 // ITU E.164 country calling codes, longest first so "+353" is not read as "+35".
@@ -305,10 +321,16 @@ const COUNTRY_CODES = (
   .split(" ")
   .sort((a, b) => b.length - a.length);
 
+// Escapes backslashes and quotes so a regex can go inside a double-quoted Overpass string.
+function toOverpassString(regex: string) {
+  return regex.replace(/[\\"]/g, "\\$&");
+}
+
 /**
- * Regex for a phone number in Overpass queries and OSM tags: (\\+|00)<countrycode> followed by
- * each remaining digit with .* in between, so any notation matches.
- * Example: "+31 515 433154" → ["(\\+|00)31.*5.*1.*5.*4.*3.*3.*1.*5.*4"]
+ * JavaScript regex source for a phone number in OSM tags: (\+|00)<countrycode> followed by each
+ * remaining digit with .* in between, so any notation matches. Overpass queries need it passed
+ * through toOverpassString first.
+ * Example: "+31 515 433154" → ["(\+|00)31.*5.*1.*5.*4.*3.*3.*1.*5.*4"]
  */
 function generatePhoneVariants(phone: string): string[] {
   let normalized = phone.replace(/[^\d+]/g, "");
@@ -320,7 +342,7 @@ function generatePhoneVariants(phone: string): string[] {
   const rest = normalized.slice(1 + countryCode.length);
   if (rest.length < 1) return [];
 
-  let pattern = `(\\\\+|00)` + countryCode;
+  let pattern = `(\\+|00)` + countryCode;
   for (const digit of rest) pattern += `.*${digit}`;
   return [pattern];
 }
