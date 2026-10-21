@@ -20,6 +20,7 @@ const DATA_TABLES = [
   "contact_emails",
   "contacts",
   "organizations",
+  "team_invites",
   "team_member_communities",
   "team_members"
 ];
@@ -166,6 +167,186 @@ describe("addTeamMember", () => {
   });
 });
 
+describe("invites", () => {
+  async function invite(adminId: number, communityIds: number[] = []) {
+    const res = await crm.createInvite({ invited_by: adminId, community_ids: communityIds });
+    if (!res.ok) throw new Error(res.error);
+    return res.token;
+  }
+
+  it("only lets admins create an invite, for known communities", async () => {
+    expect(await crm.createInvite({ invited_by: 999 })).toMatchObject({ ok: false, status: 403 });
+    expect(await crm.createInvite({ invited_by: null })).toMatchObject({ ok: false, status: 403 });
+    const adminId = await createFirstUser();
+    expect(await crm.createInvite({ invited_by: adminId, community_ids: [1, 9999] })).toMatchObject({
+      ok: false,
+      status: 400
+    });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM team_invites").first()).toEqual({ n: 0 });
+  });
+
+  it("creates a one-week token that fits a Telegram start parameter and stays out of the log", async () => {
+    const adminId = await createFirstUser();
+    const before = Date.now();
+    const res = await crm.createInvite({ invited_by: adminId, community_ids: [2, 1] });
+    if (!res.ok) throw new Error(res.error);
+    expect(res.token).toMatch(/^inv_[A-Za-z0-9_-]{22}$/);
+    expect(res.expires_at - before).toBeGreaterThanOrEqual(7 * 24 * 3_600_000);
+    expect(res.expires_at - before).toBeLessThan(7 * 24 * 3_600_000 + 60_000);
+    const audit = await lastAudit("insert");
+    expect(audit).toMatchObject({
+      performed_by: adminId,
+      details: { fields: { invited_by: { new: adminId }, community_ids: { new: [1, 2] } } }
+    });
+    expect(JSON.stringify(audit)).not.toContain(res.token.slice(4));
+  });
+
+  it("adds the user who opens the link, with the invite's communities, and uses the invite up", async () => {
+    const adminId = await createFirstUser();
+    const token = await invite(adminId, [6, 7]);
+    const res = await crm.acceptInvite({ token, telegram_id: 2001, name: "Bob Smit", telegram_username: "bobsmit" });
+    if (!res.ok) throw new Error(res.error);
+    expect(res).toMatchObject({ invited_by: { telegram_id: "1001", name: "Admin" } });
+    expect(res.existing).toBeUndefined();
+    expect([...res.communities].sort()).toEqual(["Bitcoin Friesland", "Bitcoin Groningen"]);
+    expect(
+      await env.DB.prepare(
+        "SELECT telegram_id, typeof(telegram_id) AS t, telegram_username, name, is_admin FROM team_members WHERE id = ?"
+      )
+        .bind(res.id)
+        .first()
+    ).toEqual({ telegram_id: "2001", t: "text", telegram_username: "bobsmit", name: "Bob Smit", is_admin: 0 });
+    expect(
+      await env.DB.prepare("SELECT used_by, used_at IS NOT NULL AS used FROM team_invites WHERE token = ?")
+        .bind(token)
+        .first()
+    ).toEqual({ used_by: res.id, used: 1 });
+
+    const audits = await env.DB.prepare(
+      "SELECT action, table_name, record_id, performed_by, change_details FROM audit_log WHERE id > 2 ORDER BY id"
+    ).all<{ action: string; table_name: string; record_id: string; performed_by: number; change_details: string }>();
+    expect(audits.results.map(a => [a.action, a.table_name, a.performed_by])).toEqual([
+      ["insert", "team_members", adminId],
+      ["update", "team_invites", adminId]
+    ]);
+    expect(audits.results[0].record_id).toBe(String(res.id));
+    expect(JSON.parse(audits.results[0].change_details).fields).toMatchObject({
+      telegram_id: { new: "2001" },
+      telegram_username: { new: "bobsmit" },
+      community_ids: { new: [6, 7] }
+    });
+    expect(JSON.parse(audits.results[1].change_details).fields.used_by).toEqual({ old: null, new: res.id });
+
+    // Used up: the next person gets nothing.
+    expect(await crm.acceptInvite({ token, telegram_id: 2002, name: "Carol" })).toMatchObject({
+      ok: false,
+      status: 409
+    });
+  });
+
+  it("leaves the invite unused for someone who already has access", async () => {
+    const adminId = await createFirstUser();
+    const token = await invite(adminId);
+    const before = await auditCount();
+    expect(await crm.acceptInvite({ token, telegram_id: "1001", name: "Admin" })).toEqual({
+      ok: true,
+      id: adminId,
+      existing: true,
+      invited_by: { telegram_id: "1001", name: "Admin" },
+      communities: []
+    });
+    expect(await auditCount()).toBe(before);
+    expect(await crm.acceptInvite({ token, telegram_id: "2001", name: "Bob" })).toMatchObject({ ok: true });
+  });
+
+  it("refuses an unknown, an expired and an incomplete invite", async () => {
+    const adminId = await createFirstUser();
+    expect(await crm.acceptInvite({ token: "inv_unknown", telegram_id: 2001, name: "Bob" })).toMatchObject({
+      ok: false,
+      status: 404
+    });
+    const token = await invite(adminId);
+    expect(await crm.acceptInvite({ token, telegram_id: 2001, name: "" })).toMatchObject({ ok: false, status: 400 });
+    expect(
+      await crm.acceptInvite({ token, telegram_id: 2001, name: "Bob", telegram_username: "not a username" })
+    ).toMatchObject({ ok: false, status: 400 });
+    await env.DB.prepare("UPDATE team_invites SET expires_at = ?")
+      .bind(Date.now() - 1)
+      .run();
+    expect(await crm.acceptInvite({ token, telegram_id: 2001, name: "Bob" })).toMatchObject({
+      ok: false,
+      status: 409
+    });
+    expect(await crm.validateUser("2001")).toBeNull();
+  });
+
+  it("lets only one of two people opening the same link at once in", async () => {
+    const adminId = await createFirstUser();
+    const token = await invite(adminId, [1]);
+    const results = await Promise.all([
+      crm.acceptInvite({ token, telegram_id: 2001, name: "Bob" }),
+      crm.acceptInvite({ token, telegram_id: 2002, name: "Carol" })
+    ]);
+    expect(results.filter(r => r.ok)).toHaveLength(1);
+    expect(results.filter(r => !r.ok)).toMatchObject([{ status: 409 }]);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM team_members").first()).toEqual({ n: 2 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM team_member_communities").first()).toEqual({ n: 1 });
+  });
+
+  it("does not name an inviter who was removed since", async () => {
+    const adminId = await createFirstUser();
+    const otherAdmin = await crm.acceptInvite({ token: await invite(adminId), telegram_id: 2001, name: "Bob" });
+    if (!otherAdmin.ok) throw new Error(otherAdmin.error);
+    await crm.setAdmin({ team_member_id: otherAdmin.id, is_admin: true, updated_by: adminId });
+    const token = await invite(otherAdmin.id);
+    await crm.deleteTeamMember({ telegram_id: "2001", performed_by: adminId });
+    expect(await crm.acceptInvite({ token, telegram_id: 2002, name: "Carol" })).toMatchObject({
+      ok: true,
+      invited_by: null
+    });
+  });
+});
+
+describe("setTelegramUsername", () => {
+  it("stores a changed username with an audit entry by the member, and skips an unchanged one", async () => {
+    const adminId = await createFirstUser();
+    expect(await crm.setTelegramUsername({ telegram_id: "1001", telegram_username: "admin_nl" })).toEqual({
+      ok: true,
+      changed: true
+    });
+    expect(await crm.validateUser("1001")).toMatchObject({ telegram_username: "admin_nl" });
+    expect(await lastAudit("update")).toMatchObject({
+      record_id: String(adminId),
+      performed_by: adminId,
+      details: { fields: { telegram_username: { old: null, new: "admin_nl" } } }
+    });
+    const before = await auditCount();
+    expect(await crm.setTelegramUsername({ telegram_id: "1001", telegram_username: "admin_nl" })).toEqual({
+      ok: true,
+      changed: false
+    });
+    expect(await auditCount()).toBe(before);
+    // A user can remove their username in Telegram.
+    expect(await crm.setTelegramUsername({ telegram_id: "1001", telegram_username: null })).toEqual({
+      ok: true,
+      changed: true
+    });
+    expect(await crm.validateUser("1001")).toMatchObject({ telegram_username: null });
+  });
+
+  it("refuses an unknown member and an invalid username", async () => {
+    await createFirstUser();
+    expect(await crm.setTelegramUsername({ telegram_id: "4242", telegram_username: "x_y" })).toMatchObject({
+      ok: false,
+      status: 404
+    });
+    expect(await crm.setTelegramUsername({ telegram_id: "1001", telegram_username: "@admin" })).toMatchObject({
+      ok: false,
+      status: 400
+    });
+  });
+});
+
 describe("updateTeamMember", () => {
   it("changes the name and replaces communities in one go", async () => {
     const adminId = await createFirstUser();
@@ -272,6 +453,7 @@ describe("deleteTeamMember", () => {
   it("removes (deactivates) a member who ever saved something; they lose access", async () => {
     const adminId = await createFirstUser();
     const bobId = await addBob(adminId);
+    await crm.setTelegramUsername({ telegram_id: "2001", telegram_username: "bob" });
     await crm.newContact({ name: "Alice", type: "consumer", created_by: bobId });
     expect(await crm.deleteTeamMember({ telegram_id: "2001", performed_by: adminId })).toEqual({
       ok: true,
@@ -279,8 +461,10 @@ describe("deleteTeamMember", () => {
     });
     expect(await crm.validateUser("2001")).toBeNull();
     expect(
-      await env.DB.prepare("SELECT telegram_id, is_admin FROM team_members WHERE id = ?").bind(bobId).first()
-    ).toEqual({ telegram_id: null, is_admin: 0 });
+      await env.DB.prepare("SELECT telegram_id, telegram_username, is_admin FROM team_members WHERE id = ?")
+        .bind(bobId)
+        .first()
+    ).toEqual({ telegram_id: null, telegram_username: null, is_admin: 0 });
     expect(
       await env.DB.prepare("SELECT COUNT(*) AS n FROM team_member_communities WHERE team_member_id = ?")
         .bind(bobId)
@@ -289,7 +473,13 @@ describe("deleteTeamMember", () => {
     expect(await lastAudit("update")).toMatchObject({
       record_id: String(bobId),
       performed_by: adminId,
-      details: { fields: { telegram_id: { old: "2001", new: null }, community_ids: { old: [1], new: [] } } }
+      details: {
+        fields: {
+          telegram_id: { old: "2001", new: null },
+          telegram_username: { old: "bob", new: null },
+          community_ids: { old: [1], new: [] }
+        }
+      }
     });
     // The deactivated row still counts, so first-user registration stays closed.
     expect(await crm.countTeamMembers()).toBe(2);
@@ -346,6 +536,25 @@ describe("newContact", () => {
     expect(phone).toEqual({ phone: "+31612345678" });
     const audit = await env.DB.prepare("SELECT record_id FROM audit_log WHERE table_name = 'contacts'").first();
     expect(audit).toEqual({ record_id: String(id) });
+  });
+
+  it("stores phone numbers in international form and refuses national ones", async () => {
+    for (const [input, stored] of [
+      ["+31 (0)6-1234 5678", "+31612345678"],
+      ["0031 6 12345678", "+31612345678"],
+      ["+32 470 12.34.56", "+32470123456"]
+    ]) {
+      const res = await crm.newContact({ name: "Alice", type: "consumer", phone: input });
+      if (!res.ok) throw new Error(res.error);
+      expect(
+        await env.DB.prepare("SELECT phone FROM contact_phones WHERE contact_id = ?").bind(res.id).first()
+      ).toEqual({ phone: stored });
+      expect((await lastAudit("insert")).details.fields.phone).toEqual({ old: null, new: stored });
+    }
+    for (const phone of ["06 12345678", "+31 6", "phone"]) {
+      expect(await crm.newContact({ name: "Bob", type: "consumer", phone })).toMatchObject({ ok: false, status: 400 });
+    }
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM contacts WHERE name = 'Bob'").first()).toEqual({ n: 0 });
   });
 
   it("rejects a contact without type", async () => {
@@ -549,7 +758,65 @@ describe("searchContacts", () => {
   });
 });
 
+describe("recentContacts", () => {
+  it("lists the contacts a member added or talked to, most recent first, without duplicates", async () => {
+    const adminId = await createFirstUser();
+    const bob = await crm.acceptInvite({
+      token: ((await crm.createInvite({ invited_by: adminId })) as { token: string }).token,
+      telegram_id: 2001,
+      name: "Bob"
+    });
+    if (!bob.ok) throw new Error(bob.error);
+    const org = await crm.newOrg({ name: "Cafe Satoshi", status: 2 });
+    if (!org.ok) throw new Error(org.error);
+    const add = async (name: string, createdBy: number, organizationId?: number) => {
+      const res = await crm.newContact({
+        name,
+        type: "consumer",
+        created_by: createdBy,
+        organization_id: organizationId
+      });
+      if (!res.ok) throw new Error(res.error);
+      return res.id;
+    };
+    const anna = await add("Anna", adminId, org.id);
+    const bram = await add("Bram", adminId);
+    await add("Carla", bob.id);
+    await crm.logConversation({ contact_id: anna, channel: "phone", note: "Called again", created_by: adminId });
+
+    expect(await crm.recentContacts(adminId)).toEqual([
+      { id: anna, name: "Anna", organization_name: "Cafe Satoshi" },
+      { id: bram, name: "Bram", organization_name: null }
+    ]);
+    expect((await crm.recentContacts(adminId, 1)).map(c => c.name)).toEqual(["Anna"]);
+    expect((await crm.recentContacts(bob.id)).map(c => c.name)).toEqual(["Carla"]);
+  });
+});
+
+describe("getContact", () => {
+  it("returns the contact with its organization, or null", async () => {
+    const org = await crm.newOrg({ name: "Cafe Satoshi", status: 2 });
+    if (!org.ok) throw new Error(org.error);
+    const res = await crm.newContact({ name: "Anna", type: "entrepreneur", organization_id: org.id });
+    if (!res.ok) throw new Error(res.error);
+    expect(await crm.getContact(String(res.id))).toEqual({
+      id: res.id,
+      name: "Anna",
+      organization_name: "Cafe Satoshi"
+    });
+    expect(await crm.getContact(9999)).toBeNull();
+  });
+});
+
 describe("listTeamMembers", () => {
+  it("includes the Telegram username", async () => {
+    await createFirstUser();
+    await crm.setTelegramUsername({ telegram_id: "1001", telegram_username: "admin_nl" });
+    expect(await crm.listTeamMembers()).toEqual([
+      { id: 1, telegram_id: "1001", telegram_username: "admin_nl", name: "Admin", is_admin: 1 }
+    ]);
+  });
+
   it("leaves out deactivated members", async () => {
     const adminId = await createFirstUser();
     const added = await crm.addTeamMember({ telegram_id: "2001", name: "Bob", invited_by: adminId });

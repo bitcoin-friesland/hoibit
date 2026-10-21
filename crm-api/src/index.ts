@@ -1,10 +1,14 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type {
+  AcceptedInvite,
+  AcceptInviteInput,
   AddTeamMemberInput,
   Community,
   ContactSearchRow,
+  CreateInviteInput,
   DeleteTeamMemberInput,
   FirstUserInput,
+  Invite,
   LogConversationInput,
   Lookup,
   NewContactInput,
@@ -15,6 +19,7 @@ import type {
   Result,
   RowId,
   SetAdminInput,
+  SetTelegramUsernameInput,
   TeamMember,
   TeamMemberSummary,
   TelegramId,
@@ -57,6 +62,35 @@ const sameIds = (a: number[], b: number[]) => a.length === b.length && a.every((
 // A team member may be removed (or lose admin rights) unless they are the last admin. Used in
 // the WHERE of the statement itself, so two concurrent requests cannot both pass the check.
 const NOT_LAST_ADMIN = `(is_admin = 0 OR (SELECT COUNT(*) FROM team_members WHERE is_admin = 1) > 1)`;
+
+// An invite link adds one team member and expires after a week.
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// "inv_" and 16 random bytes in base64url, 26 characters: unguessable, and within the 64 that
+// Telegram allows in a start parameter. The prefix tells the bot the parameter is an invite.
+function inviteToken() {
+  const base64 = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+  return `inv_${base64.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
+}
+
+// Telegram usernames are letters, digits and underscores; collectible ones can be short.
+const TELEGRAM_USERNAME = /^[A-Za-z0-9_]{1,32}$/;
+
+/**
+ * The phone number in international (E.164) form, e.g. "+31612345678", or undefined when it is
+ * not one. Contact phones are stored like this, so OpenStreetMap lookups and comparisons see one
+ * notation. Accepts "00" for "+", spaces, dashes, dots, slashes and brackets, and the "(0)" that
+ * Dutch and Belgian numbers often carry after the country code. National numbers ("06 …") are
+ * refused: the country they belong to is for telegram-crm to decide.
+ */
+function normalizePhone(phone: string): string | undefined {
+  let number = phone
+    .trim()
+    .replaceAll("(0)", "")
+    .replace(/[\s\-./()]/g, "");
+  if (number.startsWith("00")) number = `+${number.slice(2)}`;
+  return /^\+[1-9]\d{6,14}$/.test(number) ? number : undefined;
+}
 
 /**
  * The CRM data API. telegram-crm calls these methods over its crmApi service binding (RPC).
@@ -107,7 +141,10 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
   // Active members only: a deactivated member has no telegram_id.
   async listTeamMembers(): Promise<TeamMemberSummary[]> {
     const { results } = await this.db
-      .prepare(`SELECT id, telegram_id, name, is_admin FROM team_members WHERE telegram_id IS NOT NULL ORDER BY name`)
+      .prepare(
+        `SELECT id, telegram_id, telegram_username, name, is_admin FROM team_members
+         WHERE telegram_id IS NOT NULL ORDER BY name`
+      )
       .all<TeamMemberSummary>();
     return results;
   }
@@ -217,6 +254,144 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return { ok: true, id: lastId(results), created: true };
   }
 
+  // Creates a one-time invite link for a new team member, who will join the given communities.
+  async createInvite(data: CreateInviteInput): Promise<Result<Invite>> {
+    const invitedBy = data.invited_by;
+    if (!invitedBy || !(await this.isAdmin(invitedBy))) return refuse(403, "Only admins can invite team members");
+    const communityIds = sortedIds((data.community_ids ?? []).map(toInt));
+    // Checked now: an unknown community would otherwise only fail when the new member opens the link.
+    if (communityIds.length > 0) {
+      const known = await this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM bitcoin_communities WHERE id IN (${communityIds.map(() => "?").join(", ")})`
+        )
+        .bind(...communityIds)
+        .first<{ n: number }>();
+      if (known?.n !== communityIds.length) return refuse(400, "Unknown community");
+    }
+    const token = inviteToken();
+    const expiresAt = Date.now() + INVITE_TTL_MS;
+    const performedBy = toInt(invitedBy);
+    await this.db.batch([
+      this.db
+        .prepare(`INSERT INTO team_invites (token, invited_by, community_ids, expires_at) VALUES (?, ?, ?, ?)`)
+        .bind(token, performedBy, JSON.stringify(communityIds), expiresAt),
+      // Without the token: whoever can read the log must not be able to use the link.
+      this.db.prepare(auditSql(insertedIdText("team_invites"))).bind(
+        "insert",
+        "team_invites",
+        performedBy,
+        JSON.stringify({
+          fields: {
+            invited_by: created(performedBy),
+            community_ids: created(communityIds),
+            expires_at: created(expiresAt)
+          }
+        })
+      )
+    ]);
+    return { ok: true, token, expires_at: expiresAt };
+  }
+
+  /**
+   * Adds the Telegram user who opened an invite link as a team member, in the invite's
+   * communities; the invite is then used up. A user who already has access gets existing: true
+   * and leaves the invite unused, so it can still reach the person it was meant for.
+   */
+  async acceptInvite(data: AcceptInviteInput): Promise<Result<AcceptedInvite>> {
+    if (!data.token || !data.telegram_id || !data.name) return refuse(400, "Missing token, telegram_id or name");
+    const username = data.telegram_username || null;
+    if (username && !TELEGRAM_USERNAME.test(username)) return refuse(400, "Invalid telegram_username");
+    const invite = await this.db
+      .prepare(
+        `SELECT i.id, i.invited_by, i.community_ids, i.expires_at, i.used_by,
+                m.telegram_id AS inviter_telegram_id, m.name AS inviter_name
+         FROM team_invites i LEFT JOIN team_members m ON m.id = i.invited_by
+         WHERE i.token = ?`
+      )
+      .bind(data.token)
+      .first<{
+        id: number;
+        invited_by: number;
+        community_ids: string;
+        expires_at: number;
+        used_by: number | null;
+        inviter_telegram_id: string | null;
+        inviter_name: string | null;
+      }>();
+    if (!invite) return refuse(404, "Unknown invite");
+    // A removed inviter keeps their row without telegram_id and can no longer be told.
+    const invitedBy = invite.inviter_telegram_id
+      ? { telegram_id: invite.inviter_telegram_id, name: invite.inviter_name }
+      : null;
+    const telegramId = String(data.telegram_id);
+    const existing = await this.validateUser(telegramId);
+    if (existing) return { ok: true, id: existing.id, existing: true, invited_by: invitedBy, communities: [] };
+    const now = Date.now();
+    const usedUp = refuse(409, "Invite already used or expired");
+    if (invite.used_by !== null || invite.expires_at <= now) return usedUp;
+
+    const communityIds = JSON.parse(invite.community_ids) as number[];
+    const memberIdSql = lastIdSql("team_members");
+    // One transaction in which every statement only changes something when the one before it
+    // changed exactly one row (changes() = 1). The first, the INSERT, checks that the invite is
+    // still unused and unexpired, so of two people opening the same link only one gets in.
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `INSERT INTO team_members (telegram_id, telegram_username, name)
+           SELECT ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM team_invites WHERE id = ? AND used_by IS NULL AND expires_at > ?)
+             AND NOT EXISTS (SELECT 1 FROM team_members WHERE telegram_id = ?)`
+        )
+        .bind(telegramId, username, data.name, invite.id, now, telegramId),
+      // The admin who created the invite is the one who let the member in.
+      this.db.prepare(auditSql(insertedIdText("team_members"), { afterChange: true })).bind(
+        "insert",
+        "team_members",
+        invite.invited_by,
+        JSON.stringify({
+          fields: {
+            telegram_id: created(telegramId),
+            ...(username ? { telegram_username: created(username) } : {}),
+            name: created(data.name),
+            ...(communityIds.length > 0 ? { community_ids: created(communityIds) } : {})
+          }
+        })
+      ),
+      this.db
+        .prepare(
+          `UPDATE team_invites SET used_by = ${memberIdSql}, used_at = CURRENT_TIMESTAMP WHERE id = ? AND changes() = 1`
+        )
+        .bind(invite.id),
+      this.db
+        .prepare(auditSql("?", { details: `json_set(?, '$.fields.used_by.new', ${memberIdSql})`, afterChange: true }))
+        .bind(
+          "update",
+          "team_invites",
+          String(invite.id),
+          invite.invited_by,
+          JSON.stringify({ fields: { used_by: { old: null, new: null } } })
+        ),
+      this.db
+        .prepare(
+          `INSERT INTO team_member_communities (team_member_id, community_id)
+           SELECT ${memberIdSql}, value FROM json_each(?) WHERE changes() = 1`
+        )
+        .bind(invite.community_ids),
+      // Only meaningful after an insert; otherwise it holds an older id and is not used.
+      this.db.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'team_members'`)
+    ]);
+    if (results[0].meta.changes !== 1) {
+      // Since the checks above, someone else used the invite, or this user got access.
+      const member = await this.validateUser(telegramId);
+      if (member) return { ok: true, id: member.id, existing: true, invited_by: invitedBy, communities: [] };
+      return usedUp;
+    }
+    const communities = await this.teamMemberCommunities(telegramId);
+    return { ok: true, id: lastId(results), invited_by: invitedBy, communities: communities.map(c => c.name) };
+  }
+
   // Changes name and/or time zone, and replaces the communities when community_ids is given.
   async updateTeamMember(data: UpdateTeamMemberInput): Promise<Result> {
     if (!data.team_member_id) return refuse(400, "Missing team_member_id");
@@ -279,6 +454,33 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return { ok: true };
   }
 
+  // Keeps a member's @username current; telegram-crm calls this when Telegram reports another one.
+  async setTelegramUsername(data: SetTelegramUsernameInput): Promise<Result<{ changed: boolean }>> {
+    if (!data.telegram_id) return refuse(400, "Missing telegram_id");
+    const username = data.telegram_username || null;
+    if (username && !TELEGRAM_USERNAME.test(username)) return refuse(400, "Invalid telegram_username");
+    const member = await this.db
+      .prepare(`SELECT id, telegram_username FROM team_members WHERE telegram_id = ?`)
+      .bind(String(data.telegram_id))
+      .first<{ id: number; telegram_username: string | null }>();
+    if (!member) return refuse(404, "Team member not found");
+    if (member.telegram_username === username) return { ok: true, changed: false };
+    // The member changed it in Telegram themselves, so the audit entry is theirs.
+    await this.db.batch([
+      this.db.prepare(`UPDATE team_members SET telegram_username = ? WHERE id = ?`).bind(username, member.id),
+      this.db
+        .prepare(auditSql())
+        .bind(
+          "update",
+          "team_members",
+          String(member.id),
+          member.id,
+          JSON.stringify({ fields: { telegram_username: { old: member.telegram_username, new: username } } })
+        )
+    ]);
+    return { ok: true, changed: true };
+  }
+
   async setAdmin(data: SetAdminInput): Promise<Result<{ id: number; is_admin: 0 | 1; changed: boolean }>> {
     if (!data.team_member_id || typeof data.is_admin !== "boolean") {
       return refuse(400, "Missing team_member_id or is_admin");
@@ -320,10 +522,16 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (!data.telegram_id) return refuse(400, "Missing telegram_id");
     if (!(await this.isAdmin(data.performed_by))) return refuse(403, "Only admins can delete team members");
     const oldMember = await this.db
-      .prepare(`SELECT id, telegram_id, name, time_zone, is_admin FROM team_members WHERE telegram_id = ?`)
+      .prepare(
+        `SELECT id, telegram_id, telegram_username, name, time_zone, is_admin FROM team_members WHERE telegram_id = ?`
+      )
       .bind(String(data.telegram_id))
       .first<TeamMember>();
     if (!oldMember) return refuse(404, "Team member not found");
+    // Like telegram_id, the username identifies the Telegram account, so it goes when access does.
+    const usernameChange = oldMember.telegram_username
+      ? { telegram_username: { old: oldMember.telegram_username, new: null } }
+      : {};
     const memberId = oldMember.id;
     const performedBy = toIntOrNull(data.performed_by);
     const oldIds = await this.memberCommunityIds(memberId);
@@ -344,7 +552,10 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       // communities only if the member was deactivated (telegram_id now NULL).
       const [update] = await this.db.batch([
         this.db
-          .prepare(`UPDATE team_members SET telegram_id = NULL, is_admin = 0 WHERE id = ? AND ${NOT_LAST_ADMIN}`)
+          .prepare(
+            `UPDATE team_members SET telegram_id = NULL, telegram_username = NULL, is_admin = 0
+             WHERE id = ? AND ${NOT_LAST_ADMIN}`
+          )
           .bind(memberId),
         this.db.prepare(auditSql("?", { afterChange: true })).bind(
           "update",
@@ -354,6 +565,7 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
           JSON.stringify({
             fields: {
               telegram_id: { old: oldMember.telegram_id, new: null },
+              ...usernameChange,
               ...(oldMember.is_admin === 1 ? { is_admin: { old: 1, new: 0 } } : {}),
               ...(oldIds.length > 0 ? { community_ids: { old: oldIds, new: [] } } : {})
             }
@@ -388,6 +600,7 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
         JSON.stringify({
           fields: {
             telegram_id: { old: oldMember.telegram_id, new: null },
+            ...usernameChange,
             name: { old: oldMember.name, new: null },
             time_zone: { old: oldMember.time_zone, new: null },
             is_admin: { old: oldMember.is_admin, new: null },
@@ -516,6 +729,43 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return results;
   }
 
+  // The contacts a team member added or logged a conversation with, most recent first. Read from
+  // audit_log: contacts have no created_by, and its ids put both kinds of entry in one order.
+  async recentContacts(teamMemberId: RowId, limit = 5): Promise<ContactSearchRow[]> {
+    const memberId = toInt(teamMemberId);
+    const { results } = await this.db
+      .prepare(
+        `SELECT c.id, c.name, o.name AS organization_name
+         FROM (
+           SELECT CAST(record_id AS INTEGER) AS contact_id, id AS seen FROM audit_log
+           WHERE table_name = 'contacts' AND action = 'insert' AND performed_by = ?
+           UNION ALL
+           SELECT conv.contact_id, a.id FROM audit_log a
+           JOIN conversations conv ON conv.id = CAST(a.record_id AS INTEGER)
+           WHERE a.table_name = 'conversations' AND a.action = 'insert' AND a.performed_by = ?
+         ) r
+         JOIN contacts c ON c.id = r.contact_id
+         LEFT JOIN organizations o ON o.id = c.organization_id
+         GROUP BY c.id
+         ORDER BY MAX(r.seen) DESC
+         LIMIT ?`
+      )
+      .bind(memberId, memberId, limit)
+      .all<ContactSearchRow>();
+    return results;
+  }
+
+  async getContact(id: RowId): Promise<ContactSearchRow | null> {
+    return this.db
+      .prepare(
+        `SELECT contacts.id, contacts.name, organizations.name AS organization_name
+         FROM contacts LEFT JOIN organizations ON contacts.organization_id = organizations.id
+         WHERE contacts.id = ?`
+      )
+      .bind(toInt(id))
+      .first<ContactSearchRow>();
+  }
+
   // One transaction: the new organization (if given), contact, email, phone and audit entries.
   async newContact(data: NewContactInput): Promise<Result<{ id: number; organization_id: number | null }>> {
     if (!data.name || !data.type) return refuse(400, "Missing required fields: name or type");
@@ -526,6 +776,8 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (newOrganization && (!newOrganization.name || !newOrganization.status)) {
       return refuse(400, "Missing required fields for new_organization: name or status");
     }
+    const phone = data.phone ? normalizePhone(data.phone) : null;
+    if (phone === undefined) return refuse(400, "Phone number must be international, e.g. +31612345678");
     const contactIdSql = lastIdSql("contacts");
     const createdBy = toIntOrNull(data.created_by);
     const organizationId = toIntOrNull(data.organization_id);
@@ -547,9 +799,9 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
         this.db.prepare(`INSERT INTO contact_emails (contact_id, email) VALUES (${contactIdSql}, ?)`).bind(data.email)
       );
     }
-    if (data.phone) {
+    if (phone) {
       statements.push(
-        this.db.prepare(`INSERT INTO contact_phones (contact_id, phone) VALUES (${contactIdSql}, ?)`).bind(data.phone)
+        this.db.prepare(`INSERT INTO contact_phones (contact_id, phone) VALUES (${contactIdSql}, ?)`).bind(phone)
       );
     }
     const details = newOrganization
@@ -567,7 +819,7 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
             organization_id: created(organizationId),
             ...(data.nostr_npub ? { nostr_npub: created(data.nostr_npub) } : {}),
             ...(data.email ? { email: created(data.email) } : {}),
-            ...(data.phone ? { phone: created(data.phone) } : {})
+            ...(phone ? { phone: created(phone) } : {})
           }
         })
       ),
