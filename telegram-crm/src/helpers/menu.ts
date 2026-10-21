@@ -15,6 +15,7 @@ const MEMBER_COMMANDS: BotCommand[] = [
   { command: "newcontact", description: "Add a contact" },
   { command: "neworg", description: "Add an organization" },
   { command: "logconversation", description: "Log a conversation" },
+  { command: "find", description: "Look up a contact or organization" },
   { command: "cancel", description: "Stop what you are entering" },
   HELP
 ];
@@ -39,7 +40,10 @@ export function menuKeyboard(isAdmin: boolean): { inline_keyboard: InlineKeyboar
         { text: "➕ New contact", callback_data: "menu:newcontact" },
         { text: "🏢 New organization", callback_data: "menu:neworg" }
       ],
-      [{ text: "💬 Log conversation", callback_data: "menu:logconversation" }],
+      [
+        { text: "💬 Log conversation", callback_data: "menu:logconversation" },
+        { text: "🔎 Find", callback_data: "menu:find" }
+      ],
       ...(isAdmin ? [[{ text: "👥 Team", callback_data: "menu:teammember" }]] : [])
     ]
   };
