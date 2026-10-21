@@ -1,17 +1,29 @@
 /**
  * The overview card of a new contact or organization: what was entered so far, with a button per
  * optional detail and one to save. Optional details are only asked for when the user taps them,
- * so the quickest contact is a name, a type and Save.
+ * so the quickest contact is a name, a type and Save. Editing an existing contact or organization
+ * (session.edit_target, see flows/edit.ts) uses the same card, with the name as a detail too.
  *
  * Steps: awaiting_card (a button of the card) and awaiting_card_field (the value of the tapped
  * detail, or Back / Remove). Saving is up to the flow: handleCardStep calls onSave.
  */
 import { errorMessage } from "./messaging";
 import { setStep } from "./session";
-import { isNationalPhone, isValidEmail, isValidNpub, isValidWebsite, toInternationalPhone } from "./validation";
+import {
+  INVALID_ORGANIZATION_NAME,
+  isNationalPhone,
+  isValidEmail,
+  isValidName,
+  isValidNpub,
+  isValidOrganizationName,
+  isValidWebsite,
+  NAME_RULE,
+  toInternationalPhone
+} from "./validation";
 import type { ChatId, InlineKeyboardButton, SendMessage, Session } from "../types";
 
-type FieldKey = "email" | "phone" | "nostr_npub" | "organization_website" | "organization_nostr_npub";
+type FieldKey =
+  "name" | "organization" | "email" | "phone" | "nostr_npub" | "organization_website" | "organization_nostr_npub";
 
 interface Field {
   button: string;
@@ -20,6 +32,8 @@ interface Field {
   prompt: string;
   // The value to store, or the error to show.
   parse: (env: Env, session: Session, text: string) => Promise<{ value: string } | { error: string }>;
+  // A name: it can be changed, not removed.
+  required?: true;
 }
 
 // National numbers get +32 when all of the member's communities are Belgian, +31 otherwise.
@@ -37,6 +51,21 @@ const npub = async (_env: Env, _session: Session, text: string) =>
   isValidNpub(text) ? { value: text } : { error: "Please enter a valid nostr npub (npub1…)." };
 
 const FIELDS: Record<FieldKey, Field> = {
+  name: {
+    button: "👤 Name",
+    label: "👤 Name",
+    prompt: "What is the name?",
+    parse: async (_env, _session, text) => (isValidName(text) ? { value: text } : { error: NAME_RULE }),
+    required: true
+  },
+  organization: {
+    button: "🏢 Name",
+    label: "🏢 Name",
+    prompt: "What is the name of the organization?",
+    parse: async (_env, _session, text) =>
+      isValidOrganizationName(text) ? { value: text } : { error: INVALID_ORGANIZATION_NAME },
+    required: true
+  },
   email: {
     button: "📧 Email",
     label: "📧 Email",
@@ -69,16 +98,26 @@ const FIELDS: Record<FieldKey, Field> = {
   }
 };
 
-// The details the card offers: of the contact, and of the organization when it is new.
+// The details the card offers: of the contact, and of the organization when it is new; when
+// editing, the name and the details of what is edited.
 function fieldsOf(session: Session): FieldKey[] {
+  if (session.edit_target === "contact") return ["name", "email", "phone", "nostr_npub"];
+  if (session.edit_target === "organization")
+    return ["organization", "organization_website", "organization_nostr_npub"];
   if (session.mode === "org") return ["organization_website", "organization_nostr_npub"];
   const contact: FieldKey[] = ["email", "phone", "nostr_npub"];
   return session.organization ? [...contact, "organization_website", "organization_nostr_npub"] : contact;
 }
 
-// In /neworg there is no contact, so the organization's npub is just "Nostr".
+// On a card of just an organization there is no contact, so the organization's npub is just "Nostr".
+const organizationOnly = (session: Session) => session.mode === "org" || session.edit_target === "organization";
+const plainNostr = (session: Session, key: FieldKey) => organizationOnly(session) && key === "organization_nostr_npub";
 const labelOf = (session: Session, key: FieldKey) =>
-  session.mode === "org" && key === "organization_nostr_npub" ? FIELDS.nostr_npub.label : FIELDS[key].label;
+  plainNostr(session, key) ? FIELDS.nostr_npub.label : FIELDS[key].label;
+
+// session[key] for a detail; the name fields are typed without null, which only Remove sets.
+const setField = (session: Session, key: FieldKey, value: string | null) =>
+  void ((session as Record<FieldKey, string | null | undefined>)[key] = value);
 
 const isField = (key: string | undefined): key is FieldKey => !!key && key in FIELDS;
 
@@ -87,12 +126,13 @@ export type CardHeader = (session: Session) => string[];
 
 function cardText(session: Session, header: CardHeader) {
   const details = fieldsOf(session).map(key => `${labelOf(session, key)}: ${session[key] || "—"}`);
-  return [...header(session), "", ...details, "", "Tap a detail to add it, or Save."].join("\n");
+  const hint = session.edit_target ? "Tap a detail to change it, then Save." : "Tap a detail to add it, or Save.";
+  return [...header(session), "", ...details, "", hint].join("\n");
 }
 
 function cardKeyboard(session: Session): InlineKeyboardButton[][] {
   const fields = fieldsOf(session).map(key => ({
-    text: session.mode === "org" && key === "organization_nostr_npub" ? FIELDS.nostr_npub.button : FIELDS[key].button,
+    text: plainNostr(session, key) ? FIELDS.nostr_npub.button : FIELDS[key].button,
     callback_data: `card:${key}`
   }));
   const rows: InlineKeyboardButton[][] = [];
@@ -143,7 +183,7 @@ export async function handleCardStep(
       setStep(session, "awaiting_card_field");
       await persistSession();
       const buttons = [{ text: "⬅️ Back", callback_data: "card:back" }];
-      if (session[key]) buttons.push({ text: "🗑️ Remove", callback_data: "card:remove" });
+      if (session[key] && !FIELDS[key].required) buttons.push({ text: "🗑️ Remove", callback_data: "card:remove" });
       await sendMessage(env, chatId, FIELDS[key].prompt, {
         reply_markup: { inline_keyboard: [buttons] },
         accepts_text: true
@@ -160,7 +200,7 @@ export async function handleCardStep(
       return true;
     }
     if (text === undefined) {
-      if (cb === "card:remove") session[key] = null;
+      if (cb === "card:remove" && !FIELDS[key].required) setField(session, key, null);
       else if (cb !== "card:back") {
         await sendMessage(env, chatId, errorMessage(`${FIELDS[key].prompt} Or tap Back.`));
         return true;
@@ -171,7 +211,7 @@ export async function handleCardStep(
         await sendMessage(env, chatId, errorMessage(parsed.error));
         return true;
       }
-      session[key] = parsed.value;
+      setField(session, key, parsed.value);
     }
     await showCard(sendMessage, env, chatId, session, persistSession, header);
     return true;

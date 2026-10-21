@@ -2,8 +2,11 @@ import { handleContactFlow } from "./flows/contact";
 import { handleNewOrgFlow } from "./flows/org";
 import { handleConversationFlow } from "./flows/conversation";
 import { handleTeamMemberFlow } from "./flows/teammember";
+import { handleFindFlow } from "./flows/find";
+import { handleEditFlow } from "./flows/edit";
 import { ensureCommandMenus, helpText, menuKeyboard } from "./helpers/menu";
 import { errorMessage, isErrorMessage } from "./helpers/messaging";
+import { parseRecordData, recordCard } from "./helpers/record";
 import {
   botUsername,
   callTelegram,
@@ -33,7 +36,9 @@ const FLOWS: Record<NonNullable<Session["mode"]>, FlowHandler> = {
   contact: handleContactFlow,
   org: handleNewOrgFlow,
   conversation: handleConversationFlow,
-  teammember: handleTeamMemberFlow
+  teammember: handleTeamMemberFlow,
+  find: handleFindFlow,
+  edit: handleEditFlow
 };
 
 const SOMETHING_WENT_WRONG = "Something went wrong. Please try again later.";
@@ -63,7 +68,9 @@ const FLOW_COMMANDS: Record<NonNullable<Session["mode"]>, string> = {
   contact: "/newcontact",
   org: "/neworg",
   conversation: "/logconversation",
-  teammember: "/teammember"
+  teammember: "/teammember",
+  find: "/find",
+  edit: "edit"
 };
 
 const CANCEL_BUTTON = { text: "✖️ Cancel", callback_data: "cancel" };
@@ -344,10 +351,10 @@ async function startFlow(env: Env, store: SessionStore, actor: Actor, session: S
 }
 
 /**
- * Starts the flow of a command, typed or from a main menu button (menu:<command>). Returns
- * false for a command that starts no flow.
+ * Starts the flow of a command, typed or from a main menu button (menu:<command>). args is the
+ * text typed after the command. Returns false for a command that starts no flow.
  */
-async function startCommandFlow(env: Env, store: SessionStore, actor: Actor, command: string) {
+async function startCommandFlow(env: Env, store: SessionStore, actor: Actor, command: string, args = "") {
   const owner = { created_by: actor.member.id, telegram_id: actor.userId };
   switch (command) {
     case "newcontact":
@@ -371,6 +378,10 @@ async function startCommandFlow(env: Env, store: SessionStore, actor: Actor, com
     case "logconversation":
       // The first step offers the member's recent contacts as buttons.
       await startFlow(env, store, actor, { step: "conversation_start", mode: "conversation", ...owner });
+      return true;
+    case "find":
+      // The first step searches for the name typed after /find, or asks for one.
+      await startFlow(env, store, actor, { step: "find_start", mode: "find", query: args, ...owner });
       return true;
     case "invite":
     case "teammember":
@@ -434,6 +445,26 @@ async function handleButton(
         step: "log_contact",
         mode: "conversation",
         contact_id: contactId,
+        created_by: member.id,
+        telegram_id: userId
+      });
+      return reply("OK");
+    }
+    // The buttons of a contact's or organization's card (helpers/record.ts).
+    const shown = parseRecordData(data, "show");
+    if (shown) {
+      const card = await recordCard(env, shown);
+      if (card) await sendMessage(env, chatId, card.text, card.options);
+      else notice = { text: "This no longer exists." };
+      return reply("OK");
+    }
+    const edited = parseRecordData(data, "edit");
+    if (edited) {
+      await startFlow(env, store, actor, {
+        step: "edit_start",
+        mode: "edit",
+        edit_target: edited.kind,
+        ...(edited.kind === "contact" ? { contact_id: edited.id } : { organization_id: edited.id }),
         created_by: member.id,
         telegram_id: userId
       });
@@ -558,7 +589,7 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
       );
       return reply("OK");
     }
-    if (await startCommandFlow(env, store, actor, name)) return reply("OK");
+    if (await startCommandFlow(env, store, actor, name, command.args)) return reply("OK");
     // Never hand a command to a flow as input, e.g. as the note of a conversation.
     await sendMessage(env, chatId, "Unknown command. Type /help for available commands.");
     return reply("Unknown command");

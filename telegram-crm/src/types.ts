@@ -33,7 +33,7 @@ export type UserId = number | string;
  * has their own flow. Each flow uses its own subset of the optional fields.
  */
 export interface Session {
-  mode?: "contact" | "org" | "conversation" | "teammember";
+  mode?: "contact" | "org" | "conversation" | "teammember" | "find" | "edit";
   step?: string;
   // Telegram user id of the user running the flow
   telegram_id?: string;
@@ -82,6 +82,14 @@ export interface Session {
   note?: string;
   // the name that found no contact, for "Add as a new contact"
   pending_contact_name?: string;
+
+  // find flow: the name typed after /find
+  query?: string;
+
+  // edit flow: what is edited (contact_id or organization_id), and its details as they were, so
+  // only changes are saved. The card keeps the details in the fields of the contact flow.
+  edit_target?: "contact" | "organization";
+  edit_original?: Record<string, string | null>;
 
   // team member flow
   invite_picker?: CommunityPicker;
