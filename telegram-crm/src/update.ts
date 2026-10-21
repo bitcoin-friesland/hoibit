@@ -1,8 +1,9 @@
 import { handleContactFlow } from "./flows/contact";
 import { handleNewOrgFlow } from "./flows/org";
 import { handleConversationFlow } from "./flows/conversation";
-import { handleFirstUserFlow } from "./flows/first_user";
 import { handleTeamMemberFlow } from "./flows/teammember";
+import { errorMessage } from "./helpers/messaging";
+import { botUsername, callTelegram, sendMessage, type ApiSendOptions } from "./helpers/telegram";
 import type {
   ChatId,
   FlowHandler,
@@ -11,14 +12,15 @@ import type {
   Session,
   SessionStore,
   TelegramUpdate,
+  TelegramUser,
   UpdateResult
 } from "./types";
+import type { TeamMember } from "../../crm-api/src/types";
 
 const FLOWS: Record<NonNullable<Session["mode"]>, FlowHandler> = {
   contact: handleContactFlow,
   org: handleNewOrgFlow,
   conversation: handleConversationFlow,
-  first_user: handleFirstUserFlow,
   teammember: handleTeamMemberFlow
 };
 
@@ -27,76 +29,14 @@ const STALE_BUTTON = "This button is no longer active.";
 const EXPIRED_BUTTON = "This button has expired. Start again with /help.";
 const NOT_AUTHORIZED_BUTTON = "You are not authorized to use this bot.";
 const ONLY_ADMINS = "Only admins can manage team members.";
+const NOT_ON_TEAM = "You're not on the team yet. To join, ask an admin for an invite link.";
+const INVALID_INVITE =
+  "This invite link is no longer valid: it was used already or it expired. Ask an admin for a new one.";
 
 // mail-to-tg's SpamButtons entrypoint (mail-to-tg/src/buttons.ts). Its types are not imported:
 // they would type-check mail-to-tg's code against this Worker's Env.
 interface SpamButtons {
   press(data: string, chatId: number, messageId: number): Promise<string>;
-}
-
-interface TelegramResponse<T> {
-  ok: boolean;
-  result?: T;
-  error_code?: number;
-  description?: string;
-}
-
-/**
- * Calls the Bot API. Returns the result, or undefined when Telegram refused the
- * call or could not be reached; both are logged. The request URL contains the
- * bot token, so it is never logged.
- */
-async function callTelegram<T>(env: Env, method: string, body: object): Promise<T | undefined> {
-  let res: Response;
-  try {
-    res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-  } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
-    const token = env.TELEGRAM_TOKEN;
-    console.error("Telegram API call failed", { method, error: token ? error.replaceAll(token, "<token>") : error });
-    return undefined;
-  }
-  const data = await res.json<TelegramResponse<T>>().catch(() => undefined);
-  if (!data?.ok) {
-    console.error("Telegram API call failed", {
-      method,
-      status: res.status,
-      error_code: data?.error_code,
-      description: data?.description
-    });
-    return undefined;
-  }
-  return data.result;
-}
-
-// SendOptions as the Bot API takes them, plus what asQuestion adds in a group.
-interface ApiSendOptions extends Omit<SendOptions, "reply_markup"> {
-  reply_markup?: SendOptions["reply_markup"] | { force_reply: true; selective?: boolean };
-  reply_parameters?: { message_id: number; allow_sending_without_reply: true };
-}
-
-// Sends a message; returns its message_id, or undefined when Telegram did not send it.
-async function sendMessage(env: Env, chatId: ChatId, text: string, options: ApiSendOptions = {}) {
-  const { reply_markup, accepts_text: _, ...rest } = options;
-  const message = await callTelegram<{ message_id: number }>(env, "sendMessage", {
-    chat_id: chatId,
-    text,
-    ...rest,
-    ...(reply_markup ? { reply_markup: JSON.stringify(reply_markup) } : {})
-  });
-  return message?.message_id;
-}
-
-// The bot's own username, asked once per isolate; undefined while getMe fails.
-let ownUsername: string | undefined;
-
-async function botUsername(env: Env) {
-  ownUsername ??= (await callTelegram<{ username?: string }>(env, "getMe", {}))?.username;
-  return ownUsername;
 }
 
 const COMMAND = /^\/(\w+)(?:@(\w+))?(?:\s+(.*))?$/;
@@ -106,18 +46,73 @@ const COMMAND = /^\/(\w+)(?:@(\w+))?(?:\s+(.*))?$/;
  * privacy mode Telegram delivers group commands as /cmd@BotName. A command
  * addressed to another bot gets forOtherBot; when getMe fails the command is
  * accepted rather than every addressed command ignored. name is "" for text that
- * starts with "/" but is no command.
+ * starts with "/" but is no command; args is the text after the command, such as
+ * the parameter of a t.me/<bot>?start=<parameter> link.
  */
 async function parseCommand(env: Env, text: string) {
   if (!text.startsWith("/")) return undefined;
   const match = COMMAND.exec(text);
-  if (!match) return { name: "", forOtherBot: false };
-  const [, name, addressee] = match;
+  if (!match) return { name: "", args: "", forOtherBot: false };
+  const [, name, addressee, args = ""] = match;
   if (addressee) {
     const own = await botUsername(env);
-    if (own && own.toLowerCase() !== addressee.toLowerCase()) return { name, forOtherBot: true };
+    if (own && own.toLowerCase() !== addressee.toLowerCase()) return { name, args, forOtherBot: true };
   }
-  return { name, forOtherBot: false };
+  return { name, args, forOtherBot: false };
+}
+
+// The name in a user's Telegram profile.
+const profileName = (user: TelegramUser) => [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+
+function helpText(isAdmin: boolean) {
+  const adminCommands = isAdmin
+    ? `\n/teammember - Manage team members (invite, edit, remove, admin rights)\n/invite - Make an invite link for a new team member`
+    : "";
+  return `Available commands:
+/newcontact - Add new contact
+/neworg - Add new organization
+/logconversation - Log a conversation${adminCommands}
+/cancel - Cancel current input`;
+}
+
+// Keeps the member's @username in crm-api the one Telegram reports; a failure is only logged.
+async function syncUsername(env: Env, member: TeamMember, user: TelegramUser) {
+  const username = user.username ?? null;
+  if ((member.telegram_username ?? null) === username) return;
+  await env.crmApi
+    .setTelegramUsername({ telegram_id: member.telegram_id, telegram_username: username })
+    .catch((e: unknown) => console.error("Updating the Telegram username failed", e));
+}
+
+/**
+ * /start inv_… from someone not on the team: they opened an invite link. Adds them to the
+ * team, welcomes them and tells whoever made the link.
+ */
+async function acceptInvite(env: Env, chatId: ChatId, user: TelegramUser, token: string) {
+  const name = profileName(user) || String(user.id);
+  const res = await env.crmApi.acceptInvite({
+    token,
+    telegram_id: String(user.id),
+    name,
+    telegram_username: user.username ?? null
+  });
+  if (!res.ok) {
+    await sendMessage(env, chatId, INVALID_INVITE);
+    return;
+  }
+  // They got access in another way since handleMessage looked them up.
+  if (res.existing) {
+    await sendMessage(env, chatId, `You're already on the team.\n\n${helpText(false)}`);
+    return;
+  }
+  const lines = [`👋 Welcome to the team, ${name}!`];
+  if (res.invited_by?.name) lines.push(`${res.invited_by.name} invited you.`);
+  if (res.communities.length > 0) lines.push(`Your communities: ${res.communities.join(", ")}.`);
+  await sendMessage(env, chatId, `${lines.join("\n")}\n\n${helpText(false)}`);
+  if (res.invited_by) {
+    const who = user.username ? `${name} (@${user.username})` : name;
+    await sendMessage(env, res.invited_by.telegram_id, `✅ ${who} joined the team with your invite link.`);
+  }
 }
 
 const reply = (body: string): UpdateResult => ({ status: 200, body });
@@ -252,6 +247,7 @@ async function handleButton(
       store.deleteSession(userId);
       return reply("Forbidden");
     }
+    await syncUsername(env, member, callback.from);
     // The spam button under an email that mail-to-tg posted; it belongs to no session.
     if (callback.data?.startsWith("spam:")) {
       notice = await (env.mailToTg as unknown as SpamButtons)
@@ -303,40 +299,39 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
   const command = await parseCommand(env, text);
   if (command?.forOtherBot) return reply("Command for another bot");
 
-  let session = store.getSession(userId);
+  const session = store.getSession(userId);
   const member = await env.crmApi.validateUser(userId);
+  // An invite link opened: t.me/<bot>?start=inv_… arrives as /start inv_…
+  if (command?.name === "start" && command.args.startsWith("inv_")) {
+    if (member) await sendMessage(env, chatId, `You're already on the team.\n\n${helpText(member.is_admin === 1)}`);
+    else await acceptInvite(env, chatId, message.from!, command.args);
+    return reply("OK");
+  }
   if (!member) {
     const count = await env.crmApi.countTeamMembers();
     if (count > 0) {
       // In groups only answer commands, not every message of a non-member.
-      if ((isPrivate || command) && !store.wasUnauthorizedNotified()) {
-        store.markUnauthorizedNotified();
-        await sendMessage(
-          env,
-          chatId,
-          `You are not authorized to use this bot. Contact a team member for access. Share the team member your Telegram user ID ${userId}`
-        );
+      if ((isPrivate || command) && !store.wasUnauthorizedNotified(userId)) {
+        store.markUnauthorizedNotified(userId);
+        await sendMessage(env, chatId, NOT_ON_TEAM);
       }
       return reply("Forbidden");
     }
-    if (session?.mode !== "first_user") {
-      session = { step: "awaiting_first_name", telegram_id: userId, mode: "first_user" };
-      store.putSession(userId, session);
-      await sendMessage(
-        env,
-        chatId,
-        ...asQuestion(
-          chatId,
-          "Welcome! You are the first user. Please enter your name to register as the first team member:",
-          {},
-          message.message_id
-        )
-      );
-      return reply("OK");
-    }
+    // No team yet: whoever talks to the bot first becomes its first admin, under their Telegram name.
+    const name = profileName(message.from!) || userId;
+    const res = await env.crmApi.firstUser({ telegram_id: userId, name });
+    await sendMessage(
+      env,
+      chatId,
+      res.ok
+        ? `👋 Welcome! You are the first team member, so you are an admin, registered as "${name}".\n\n${helpText(true)}`
+        : errorMessage("Registering you as the first team member failed. Please try again.")
+    );
+    return reply("OK");
   }
-  const createdBy = member ? member.id : null;
-  const isAdmin = member?.is_admin === 1;
+  await syncUsername(env, member, message.from!);
+  const createdBy = member.id;
+  const isAdmin = member.is_admin === 1;
 
   // Starts a new flow for this user, replacing any flow they had.
   async function startFlow(newSession: Session, prompt: string) {
@@ -347,21 +342,12 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
 
   if (command) {
     const owner = { created_by: createdBy, telegram_id: userId };
-    switch (command.name) {
+    // The "Open private chat" button of /invite in a group opens t.me/<bot>?start=invite.
+    const name = command.name === "start" && command.args === "invite" ? "invite" : command.name;
+    switch (name) {
       case "start":
       case "help": {
-        const adminCommands = isAdmin
-          ? `\n/teammember - Manage team members (invite, edit, remove, admin rights)\n/invite - Invite a new team member`
-          : "";
-        await sendMessage(
-          env,
-          chatId,
-          `Available commands:
-/newcontact - Add new contact
-/neworg - Add new organization
-/logconversation - Log a conversation${adminCommands}
-/cancel - Cancel current input`
-        );
+        await sendMessage(env, chatId, helpText(isAdmin));
         return reply("OK");
       }
       case "cancel":
@@ -382,22 +368,21 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
           "Which contact did you talk to? Type part of the name."
         );
       case "invite":
-      case "teammember":
+      case "teammember": {
         if (!isAdmin) {
           await sendMessage(env, chatId, ONLY_ADMINS);
           return reply("OK");
         }
-        if (command.name === "invite") {
-          // Shortcut into the invite steps of the team member flow
-          return startFlow(
-            { step: "awaiting_invite_id", mode: "teammember", ...owner },
-            "What is the Telegram user ID of the team member you want to invite?"
-          );
-        }
-        session = { step: "teammember_menu", mode: "teammember", ...owner };
-        store.putSession(userId, session);
-        await runFlow(env, store, chatId, userId, session, text, message.message_id);
+        // /invite is a shortcut into the invite steps of the team member flow.
+        const flow: Session = {
+          step: name === "invite" ? "invite_start" : "teammember_menu",
+          mode: "teammember",
+          ...owner
+        };
+        store.putSession(userId, flow);
+        await runFlow(env, store, chatId, userId, flow, undefined, message.message_id);
         return reply("OK");
+      }
       default:
         // Never hand a command to a flow as input, e.g. as the note of a conversation.
         await sendMessage(env, chatId, "Unknown command. Type /help for available commands.");

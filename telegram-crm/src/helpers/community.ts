@@ -31,12 +31,14 @@ export type PickerResult = "updated" | "done" | "skip" | "invalid" | { error: st
 /**
  * Creates picker state, preloaded with the team member's own communities.
  * preselected communities (e.g. the current ones of a member being edited) start
- * selected and are shown first, next to the own ones.
+ * selected and are shown first, next to the own ones. With selectOwn the own
+ * communities start selected too, for when they are the likely answer.
  */
 export async function startCommunityPicker(
   env: Env,
   telegramId: string | undefined,
-  preselected: PickedCommunity[] = []
+  preselected: PickedCommunity[] = [],
+  { selectOwn = false } = {}
 ): Promise<CommunityPicker> {
   let own: { id: number; name: string; region: string | null }[] = [];
   try {
@@ -48,7 +50,7 @@ export async function startCommunityPicker(
   return {
     own: shown.map(c => c.id),
     known: Object.fromEntries(shown.map(c => [c.id, { name: c.name, region: c.region || null }])),
-    selected: preselected.map(c => c.id),
+    selected: (selectOwn ? shown : preselected).map(c => c.id),
     countries: null,
     country: null,
     countryIds: null

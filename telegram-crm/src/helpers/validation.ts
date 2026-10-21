@@ -24,10 +24,6 @@ export function isValidPhone(phone: string | undefined): phone is string {
   return /^(?:\+|00)/.test(trimmed) && /^[\d\s()+-]+$/.test(trimmed);
 }
 
-export function isValidTelegramId(id: string | undefined): id is string {
-  return typeof id === "string" && /^\d+$/.test(id.trim());
-}
-
 export function isValidNote(note: string | undefined): note is string {
   return typeof note === "string" && note.trim().length >= 5;
 }

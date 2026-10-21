@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { escapeForOverpass } from "../src/helpers/osm";
-import { addAdmin, callbackAnswers, chatAs, resetAndStubFetch, type SentMessage } from "./harness";
+import { addAdmin, callbackAnswers, chatAs, groupChat, resetAndStubFetch, type SentMessage } from "./harness";
 
 const ADMIN = 5001;
 let sent: SentMessage[];
@@ -19,12 +19,24 @@ describe("webhook", () => {
     expect(sent).toHaveLength(0);
   });
 
-  it("tells an unknown user they are not authorized", async () => {
+  it("tells an unknown user how to join, without asking for their Telegram ID", async () => {
     await addAdmin(ADMIN);
     const res = await chatAs(6001).text("/help");
     // Any other status makes Telegram redeliver the update.
     expect(res.status).toBe(200);
-    expect(lastText()).toContain("not authorized");
+    expect(lastText()).toBe("You're not on the team yet. To join, ask an admin for an invite link.");
+  });
+
+  it("tells each newcomer in a group once, not at every command", async () => {
+    await addAdmin(ADMIN);
+    const group = groupChat();
+    await group.as(6001).text("/help");
+    await group.as(6001).text("/newcontact");
+    await group.as(6002).text("/help");
+    expect(sent.map(m => m.text)).toEqual([
+      "You're not on the team yet. To join, ask an admin for an invite link.",
+      "You're not on the team yet. To join, ask an admin for an invite link."
+    ]);
   });
 });
 
@@ -224,28 +236,6 @@ describe("/invite", () => {
     await env.DB.prepare("INSERT INTO team_members (telegram_id, name) VALUES (?, ?)").bind("7001", "Member").run();
     await chatAs(7001).text("/invite");
     expect(lastText()).toBe("Only admins can manage team members.");
-  });
-
-  it("adds the invited team member with the chosen communities", async () => {
-    await addAdmin(ADMIN);
-    const chat = chatAs(ADMIN);
-    await chat.text("/invite");
-    await chat.text("7001");
-    await chat.text("Erin");
-    await chat.text("Europe/Amsterdam");
-    await chat.press("choose_other");
-    await chat.press("country:0");
-    const keyboard = JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard;
-    await chat.press(keyboard[0][0].callback_data);
-    await chat.press("done");
-    await chat.text("confirm");
-    expect(lastText()).toBe('✅ "Erin" added as team member. Ask them to open the bot and send /help.');
-    const member = await env.DB.prepare(
-      `SELECT m.telegram_id, m.time_zone, COUNT(c.community_id) AS communities
-       FROM team_members m LEFT JOIN team_member_communities c ON c.team_member_id = m.id
-       WHERE m.telegram_id = '7001'`
-    ).first();
-    expect(member).toEqual({ telegram_id: "7001", time_zone: "Europe/Amsterdam", communities: 1 });
   });
 });
 

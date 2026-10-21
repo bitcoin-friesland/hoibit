@@ -1,6 +1,7 @@
-import { isValidTelegramId, isValidName } from "../helpers/validation";
+import { isValidName } from "../helpers/validation";
 import { setStep } from "../helpers/session";
 import { errorMessage, successMessage } from "../helpers/messaging";
+import { botUsername, startLink } from "../helpers/telegram";
 import {
   startCommunityPicker,
   renderCommunityPicker,
@@ -10,17 +11,101 @@ import {
 import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
 import type { TeamMemberSummary, UpdateTeamMemberInput } from "../../../crm-api/src/types";
 
-const INVITE_PICKER_TITLE = "Select Bitcoin communities for the new team member:";
+const INVITE_PICKER_TITLE = "Which Bitcoin communities will the new team member join?";
 const ONLY_ADMINS = "Only admins can manage team members.";
+const INVITE_FAILED = "Could not create the invite link. Please try again.";
 
-// How a member is named in messages; a member without a name by their Telegram ID.
-const memberLabel = (m: Pick<TeamMemberSummary, "name" | "telegram_id">) => m.name ?? m.telegram_id;
+type MemberNames = Pick<TeamMemberSummary, "name" | "telegram_username" | "telegram_id">;
 
-// One button per member; the Telegram ID tells members with the same name apart.
+// How a member is named in messages: their name, else their @username, else their Telegram ID.
+const memberLabel = (m: MemberNames) => m.name ?? (m.telegram_username ? `@${m.telegram_username}` : m.telegram_id);
+
+// How a member is listed: the name with the @username, which also tells equal names apart.
+const memberLine = (m: MemberNames) =>
+  m.name && m.telegram_username ? `${m.name} (@${m.telegram_username})` : memberLabel(m);
+
+// One button per member. Members with the same name and no username are told apart by Telegram ID.
 function memberButtons(members: TeamMemberSummary[]) {
-  return members.map(m => [
-    { text: m.name ? `${m.name} (${m.telegram_id})` : m.telegram_id, callback_data: `member:${m.id}` }
-  ]);
+  return members.map(m => {
+    const sameName = m.name !== null && members.filter(o => o.name === m.name).length > 1;
+    const text = sameName && !m.telegram_username ? `${m.name} (${m.telegram_id})` : memberLine(m);
+    return [{ text, callback_data: `member:${m.id}` }];
+  });
+}
+
+// Opens Telegram's share sheet with the invite link, so the admin can pick who gets it.
+const shareUrl = (link: string) =>
+  `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Open this link to join our team in the CRM bot.")}`;
+
+/**
+ * Starts an invite: the communities of the new member, then the link. Not in a group, where
+ * anyone could open the link first; there the admin gets a button to a private chat instead.
+ */
+async function startInvite(
+  sendMessage: SendMessage,
+  env: Env,
+  chatId: ChatId,
+  session: Session,
+  persistSession: () => Promise<void>,
+  removeSession: () => Promise<void>
+) {
+  if (Number(chatId) < 0) {
+    const link = await startLink(env, "invite");
+    const text = "Invite links are made in a private chat with me, so nobody else in this group can use them.";
+    await sendMessage(
+      env,
+      chatId,
+      link ? text : `${text} Send me /invite there.`,
+      link ? { reply_markup: { inline_keyboard: [[{ text: "Open private chat", url: link }]] } } : undefined
+    );
+    await removeSession();
+    return;
+  }
+  // The admin's own communities start selected: usually the new member joins those.
+  session.invite_picker = await startCommunityPicker(env, session.telegram_id, [], { selectOwn: true });
+  setStep(session, "awaiting_invite_community");
+  await persistSession();
+  await sendMessage(env, chatId, ...renderCommunityPicker(session.invite_picker, INVITE_PICKER_TITLE));
+}
+
+// Creates the invite link for the chosen communities and gives it to the admin.
+async function sendInviteLink(
+  sendMessage: SendMessage,
+  env: Env,
+  chatId: ChatId,
+  session: Session,
+  communities: { id: number; name: string }[]
+) {
+  // Known before the invite exists, so no unusable invite is created while getMe fails.
+  const username = await botUsername(env);
+  let res;
+  try {
+    res = username
+      ? await env.crmApi.createInvite({
+          invited_by: session.created_by ?? null,
+          community_ids: communities.map(c => c.id)
+        })
+      : undefined;
+  } catch {
+    res = undefined;
+  }
+  if (!res?.ok) {
+    await sendMessage(env, chatId, errorMessage(res?.status === 403 ? ONLY_ADMINS : INVITE_FAILED));
+    return;
+  }
+  const link = `https://t.me/${username}?start=${res.token}`;
+  const until = new Date(res.expires_at).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    timeZone: "Europe/Amsterdam"
+  });
+  const joins = communities.length > 0 ? ` They will join ${communities.map(c => c.name).join(", ")}.` : "";
+  await sendMessage(
+    env,
+    chatId,
+    `🔗 Invite link for a new team member:\n${link}\n\nSend it only to the person you want to add.${joins} It works once, until ${until}.`,
+    { reply_markup: { inline_keyboard: [[{ text: "📤 Share link", url: shareUrl(link) }]] } }
+  );
 }
 
 const editPickerTitle = (label: string) => `Select the Bitcoin communities of ${label}:`;
@@ -71,6 +156,7 @@ export const handleTeamMemberFlow: FlowHandler = async (
         reply_markup: {
           inline_keyboard: [
             [{ text: "Invite new team member", callback_data: "invite_new" }],
+            [{ text: "Show team", callback_data: "show_team" }],
             [{ text: "Edit existing team member", callback_data: "edit_existing" }],
             [{ text: "Remove team member", callback_data: "remove_member" }],
             [{ text: "Grant admin rights", callback_data: "grant_admin" }],
@@ -89,9 +175,19 @@ export const handleTeamMemberFlow: FlowHandler = async (
         return;
       }
       if (action === "invite_new") {
-        setStep(session, "awaiting_invite_id");
-        await persistSession();
-        await sendMessage(env, chatId, "What is the Telegram user ID of the team member you want to invite?");
+        await startInvite(sendMessage, env, chatId, session, persistSession, removeSession);
+      } else if (action === "show_team") {
+        let members;
+        try {
+          members = await env.crmApi.listTeamMembers();
+        } catch {
+          await sendMessage(env, chatId, errorMessage("Could not load team members."));
+          await removeSession();
+          return;
+        }
+        const lines = members.map(m => `• ${memberLine(m)}${m.is_admin === 1 ? " · admin" : ""}`);
+        await sendMessage(env, chatId, `👥 Team (${members.length}):\n${lines.join("\n")}`);
+        await removeSession();
       } else if (action === "grant_admin" || action === "revoke_admin") {
         const granting = action === "grant_admin";
         let members;
@@ -151,42 +247,8 @@ export const handleTeamMemberFlow: FlowHandler = async (
       }
       break;
     }
-    case "awaiting_invite_id": {
-      const inviteId = text && text.trim();
-      if (!isValidTelegramId(inviteId)) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid Telegram user ID (numbers only)."));
-        return;
-      }
-      session.invite_id = inviteId;
-      setStep(session, "awaiting_invite_name");
-      await persistSession();
-      await sendMessage(env, chatId, "Please enter the name of the team member you want to invite:");
-      break;
-    }
-    case "awaiting_invite_name": {
-      const inviteName = text && text.trim();
-      if (!isValidName(inviteName)) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid name (minimum 3 characters)."));
-        return;
-      }
-      session.invite_name = inviteName;
-      setStep(session, "awaiting_invite_timezone");
-      await persistSession();
-      await sendMessage(env, chatId, "Please enter the time zone of the team member (e.g. Europe/Amsterdam):");
-      break;
-    }
-    case "awaiting_invite_timezone": {
-      const timezone = text && text.trim();
-      if (!timezone) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid time zone."));
-        return;
-      }
-      session.invite_timezone = timezone;
-      // Offer the inviter's own communities, plus any other country (shared community picker)
-      session.invite_picker = await startCommunityPicker(env, session.telegram_id);
-      setStep(session, "awaiting_invite_community");
-      await persistSession();
-      await sendMessage(env, chatId, ...renderCommunityPicker(session.invite_picker, INVITE_PICKER_TITLE));
+    case "invite_start": {
+      await startInvite(sendMessage, env, chatId, session, persistSession, removeSession);
       break;
     }
     case "awaiting_invite_community": {
@@ -203,17 +265,8 @@ export const handleTeamMemberFlow: FlowHandler = async (
       if (result === "updated") {
         await sendMessage(env, chatId, ...renderCommunityPicker(picker, INVITE_PICKER_TITLE));
       } else if (result === "done" || result === "skip") {
-        const communities = result === "skip" ? [] : pickedCommunities(picker);
-        session.invite_communities = communities;
-        setStep(session, "awaiting_invite_confirm");
-        await persistSession();
-        await sendMessage(
-          env,
-          chatId,
-          communities.length > 0
-            ? `Communities selected: ${communities.map(c => c.name).join(", ")}. Type 'confirm' to add the team member or 'cancel' to abort.`
-            : "No communities selected. Type 'confirm' to add the team member or 'cancel' to abort."
-        );
+        await sendInviteLink(sendMessage, env, chatId, session, result === "skip" ? [] : pickedCommunities(picker));
+        await removeSession();
       } else if (typeof result === "object") {
         await sendMessage(env, chatId, errorMessage(result.error));
       } else {
@@ -221,53 +274,6 @@ export const handleTeamMemberFlow: FlowHandler = async (
           env,
           chatId,
           errorMessage("Please use the buttons to select communities, then press Done or Skip.")
-        );
-      }
-      break;
-    }
-    case "awaiting_invite_confirm": {
-      const confirmation = text && text.trim().toLowerCase();
-      if (confirmation === "confirm") {
-        try {
-          const res = await env.crmApi.addTeamMember({
-            telegram_id: session.invite_id ?? "",
-            name: session.invite_name ?? "",
-            time_zone: session.invite_timezone,
-            community_ids: (session.invite_communities ?? []).map(c => c.id),
-            invited_by: session.created_by ?? null
-          });
-          // Nothing is sent to the new member: a bot cannot message someone who never opened it.
-          if (res.ok && res.existing) {
-            await sendMessage(
-              env,
-              chatId,
-              successMessage(
-                `Telegram ID ${session.invite_id} is already a team member; communities/time zone updated.`
-              )
-            );
-          } else if (res.ok) {
-            await sendMessage(
-              env,
-              chatId,
-              successMessage(`"${session.invite_name}" added as team member. Ask them to open the bot and send /help.`)
-            );
-          } else if (res.status === 403) {
-            await sendMessage(env, chatId, errorMessage(ONLY_ADMINS));
-          } else {
-            await sendMessage(env, chatId, errorMessage("Failed to add the team member. Please try again."));
-          }
-        } catch {
-          await sendMessage(env, chatId, errorMessage("Error adding the team member."));
-        }
-        await removeSession();
-      } else if (confirmation === "cancel") {
-        await sendMessage(env, chatId, errorMessage("Invitation cancelled."));
-        await removeSession();
-      } else {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please type 'confirm' to add the team member or 'cancel' to abort.")
         );
       }
       break;
@@ -335,7 +341,6 @@ export const handleTeamMemberFlow: FlowHandler = async (
           reply_markup: {
             inline_keyboard: [
               [{ text: "Name", callback_data: "edit_field:name" }],
-              [{ text: "Time zone", callback_data: "edit_field:time_zone" }],
               [{ text: "Communities", callback_data: "edit_field:communities" }]
             ]
           }
@@ -389,10 +394,6 @@ export const handleTeamMemberFlow: FlowHandler = async (
         setStep(session, "awaiting_edit_name");
         await persistSession();
         await sendMessage(env, chatId, `Please enter the new name for ${label}:`);
-      } else if (field === "edit_field:time_zone") {
-        setStep(session, "awaiting_edit_timezone");
-        await persistSession();
-        await sendMessage(env, chatId, `Please enter the new time zone for ${label} (e.g. Europe/Amsterdam):`);
       } else if (field === "edit_field:communities") {
         let current;
         try {
@@ -429,23 +430,6 @@ export const handleTeamMemberFlow: FlowHandler = async (
         session,
         { name },
         `Name of ${session.member_label} changed to "${name}".`
-      );
-      await removeSession();
-      break;
-    }
-    case "awaiting_edit_timezone": {
-      const timeZone = text && text.trim();
-      if (!timeZone) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid time zone."));
-        return;
-      }
-      await saveMemberChanges(
-        sendMessage,
-        env,
-        chatId,
-        session,
-        { time_zone: timeZone },
-        `Time zone of ${session.member_label} changed to ${timeZone}.`
       );
       await removeSession();
       break;

@@ -18,15 +18,16 @@ describe("storeFor", () => {
     let now = start;
     const store = storeFor(memoryKv(), () => now);
     store.putSession(ADMIN, { mode: "contact", step: "awaiting_name" });
-    store.markUnauthorizedNotified();
+    store.markUnauthorizedNotified(6001);
     now = start + SESSION_TTL_MS - 1;
     expect(store.getSession(ADMIN)).toEqual({ mode: "contact", step: "awaiting_name" });
     now = start + SESSION_TTL_MS;
     expect(store.getSession(ADMIN)).toBeUndefined();
     now = start + UNAUTHORIZED_NOTICE_TTL_MS - 1;
-    expect(store.wasUnauthorizedNotified()).toBe(true);
+    expect(store.wasUnauthorizedNotified(6001)).toBe(true);
+    expect(store.wasUnauthorizedNotified(6002)).toBe(false);
     now = start + UNAUTHORIZED_NOTICE_TTL_MS;
-    expect(store.wasUnauthorizedNotified()).toBe(false);
+    expect(store.wasUnauthorizedNotified(6001)).toBe(false);
   });
 
   it("keeps one session per user", () => {

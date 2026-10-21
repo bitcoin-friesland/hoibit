@@ -287,14 +287,14 @@ describe("group chats", () => {
     expect(group.sessionOf(ADMIN)).toMatchObject({ step: "awaiting_name" });
   });
 
-  it("T14 registers the first user from a group chat with their own Telegram id", async () => {
-    const admin = groupChat(-1009876).as(ADMIN);
-    await admin.text("hello"); // no team members yet: first-user welcome
-    await admin.text("Alice Admin");
-    await admin.text("Europe/Amsterdam");
-    expect(lastText()).toBe('✅ First team member "Alice Admin" registered successfully.');
-    const row = await env.DB.prepare("SELECT telegram_id FROM team_members").first();
-    expect(row).toEqual({ telegram_id: String(ADMIN) });
+  it("T14 registers the first user from a group chat with their own Telegram id and profile name", async () => {
+    const admin = groupChat(-1009876).as(ADMIN, { first_name: "Alice", last_name: "Admin" });
+    await admin.text("/start"); // no team members yet: the first user becomes admin
+    expect(lastText()).toMatch(
+      /^👋 Welcome! You are the first team member, so you are an admin, registered as "Alice Admin"\.\n\nAvailable commands:/
+    );
+    const row = await env.DB.prepare("SELECT telegram_id, name, is_admin FROM team_members").first();
+    expect(row).toEqual({ telegram_id: String(ADMIN), name: "Alice Admin", is_admin: 1 });
   });
 });
 
@@ -345,7 +345,7 @@ describe("webhook handling", () => {
     await addAdmin(ADMIN);
     const res = await chatAs(6001).text("/help");
     expect(res.status).toBe(200);
-    expect(lastText()).toContain("not authorized");
+    expect(lastText()).toContain("You're not on the team yet.");
   });
 
   it("T6 sends no stack trace to the chat when crm-api fails, and answers 200", async () => {

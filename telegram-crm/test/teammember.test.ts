@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { addAdmin, addMember, chatAs, resetAndStubFetch, type SentMessage } from "./harness";
+import { addAdmin, addMember, BOT_USERNAME, chatAs, groupChat, resetAndStubFetch, type SentMessage } from "./harness";
 
 const ADMIN = 5001;
 const MEMBER = 7001;
@@ -19,6 +19,14 @@ function lastButtons(): string[] {
   const keyboard: { text: string }[][] = JSON.parse(withKeyboard.reply_markup!).inline_keyboard;
   return keyboard.map(row => row.map(b => b.text).join(" | "));
 }
+
+// The buttons of a message, with what they do.
+const buttonsOf = (message: SentMessage): { text: string; url?: string; callback_data?: string }[] =>
+  JSON.parse(message.reply_markup!).inline_keyboard.flat();
+
+// The texts the bot sent to one chat.
+// A chat id can go out as a string: Telegram takes both.
+const textsTo = (chatId: number) => sent.filter(m => String(m.chat_id) === String(chatId)).map(m => m.text);
 
 async function memberRow(id: number) {
   return env.DB.prepare("SELECT telegram_id, name, time_zone, is_admin FROM team_members WHERE id = ?")
@@ -50,7 +58,7 @@ describe("/teammember: remove team member", () => {
     await chat.text("/teammember");
     await chat.press("remove_member");
     expect(lastText()).toBe("Which team member do you want to remove?");
-    expect(lastButtons()).toContain(`Erin (${MEMBER})`);
+    expect(lastButtons()).toContain("Erin");
     await chat.press(`member:${memberId}`);
     expect(lastText()).toBe("Remove Erin from the team? They will lose access to the bot.");
     await chat.press("confirm_remove");
@@ -58,7 +66,7 @@ describe("/teammember: remove team member", () => {
     expect(await memberRow(memberId)).toBeNull();
 
     await chatAs(MEMBER).text("/help");
-    expect(lastText()).toContain("You are not authorized to use this bot.");
+    expect(lastText()).toBe("You're not on the team yet. To join, ask an admin for an invite link.");
   });
 
   it("deactivates a member with history and keeps the row", async () => {
@@ -84,7 +92,7 @@ describe("/teammember: remove team member", () => {
     expect(audit).toEqual({ performed_by: adminId });
 
     await chatAs(MEMBER).text("/help");
-    expect(lastText()).toContain("You are not authorized to use this bot.");
+    expect(lastText()).toContain("You're not on the team yet.");
   });
 
   it("refuses to remove the last admin", async () => {
@@ -134,7 +142,7 @@ describe("/teammember: edit existing team member", () => {
     expect(lastText()).toBe("Which team member do you want to edit?");
     await chat.press(`member:${memberId}`);
     expect(lastText()).toBe("What do you want to change for Erin?");
-    expect(lastButtons()).toEqual(["Name", "Time zone", "Communities"]);
+    expect(lastButtons()).toEqual(["Name", "Communities"]);
     await chat.press("edit_field:name");
     expect(lastText()).toBe("Please enter the new name for Erin:");
     await chat.text("x");
@@ -148,20 +156,6 @@ describe("/teammember: edit existing team member", () => {
       .bind(String(memberId))
       .first();
     expect(audit).toEqual({ performed_by: adminId });
-  });
-
-  it("changes the time zone", async () => {
-    await addAdmin(ADMIN);
-    const memberId = (await addMember(MEMBER, "Erin"))!;
-    const chat = chatAs(ADMIN);
-    await chat.text("/teammember");
-    await chat.press("edit_existing");
-    await chat.press(`member:${memberId}`);
-    await chat.press("edit_field:time_zone");
-    expect(lastText()).toBe("Please enter the new time zone for Erin (e.g. Europe/Amsterdam):");
-    await chat.text("Europe/Lisbon");
-    expect(lastText()).toBe("✅ Time zone of Erin changed to Europe/Lisbon.");
-    expect(await memberRow(memberId)).toMatchObject({ time_zone: "Europe/Lisbon" });
   });
 
   it("replaces the communities, starting from the member's current ones", async () => {
@@ -205,30 +199,165 @@ describe("/teammember: edit existing team member", () => {
   });
 });
 
-describe("/invite result message", () => {
-  it("X1 inviting someone who already is a team member does not claim an invitation was sent", async () => {
-    await addAdmin(ADMIN);
+describe("invite links", () => {
+  const INVITE_LINK = new RegExp(
+    String.raw`^🔗 Invite link for a new team member:\nhttps://t\.me/${BOT_USERNAME}\?start=(inv_[\w-]+)\n`
+  );
+
+  // Runs /invite as the admin with their own communities preselected; returns the start parameter.
+  async function createInvite() {
     const chat = chatAs(ADMIN);
     await chat.text("/invite");
-    await chat.text(String(ADMIN));
-    await chat.text("Admin Again");
-    await chat.text("Europe/Amsterdam");
-    await chat.press("skip");
-    await chat.text("confirm");
-    expect(lastText()).not.toMatch(/Invitation sent/);
-    expect(lastText()).toBe(`✅ Telegram ID ${ADMIN} is already a team member; communities/time zone updated.`);
+    await chat.press("done");
+    const token = INVITE_LINK.exec(lastText())?.[1];
+    if (!token) throw new Error(`No invite link in: ${lastText()}`);
+    return token;
+  }
+
+  it("gives the admin a one-time link; whoever opens it joins with the chosen communities", async () => {
+    const adminId = await addAdmin(ADMIN);
+    await env.DB.prepare("INSERT INTO team_member_communities (team_member_id, community_id) VALUES (?, 6)")
+      .bind(adminId)
+      .run();
+    const chat = chatAs(ADMIN);
+    await chat.text("/invite");
+    expect(lastText()).toBe("Which Bitcoin communities will the new team member join?");
+    // The admin's own community starts selected.
+    expect(lastButtons()[0]).toBe("✅ Bitcoin Friesland");
+    await chat.press("done");
+    const message = sent[sent.length - 1];
+    expect(message.text).toMatch(INVITE_LINK);
+    expect(message.text).toMatch(
+      /Send it only to the person you want to add\. They will join Bitcoin Friesland\. It works once, until \d+ \w+\.$/
+    );
+    const link = message.text.split("\n")[1];
+    expect(buttonsOf(message)).toEqual([
+      {
+        text: "📤 Share link",
+        url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Open this link to join our team in the CRM bot.")}`
+      }
+    ]);
+    const token = INVITE_LINK.exec(message.text)![1];
+
+    await chatAs(MEMBER, { first_name: "Erin", last_name: "de Boer", username: "erin_db" }).text(`/start ${token}`);
+    expect(textsTo(MEMBER)[0]).toMatch(
+      /^👋 Welcome to the team, Erin de Boer!\nAdmin invited you\.\nYour communities: Bitcoin Friesland\.\n\nAvailable commands:/
+    );
+    expect(textsTo(ADMIN).at(-1)).toBe("✅ Erin de Boer (@erin_db) joined the team with your invite link.");
+    const member = await env.DB.prepare(
+      "SELECT id, telegram_id, telegram_username, name, is_admin FROM team_members WHERE telegram_id = ?"
+    )
+      .bind(String(MEMBER))
+      .first<{ id: number }>();
+    expect(member).toMatchObject({
+      telegram_id: String(MEMBER),
+      telegram_username: "erin_db",
+      name: "Erin de Boer",
+      is_admin: 0
+    });
+    expect(await communityIds(member!.id)).toEqual([6]);
+
+    await chatAs(MEMBER).text("/help");
+    expect(lastText()).toContain("Available commands");
+
+    // The link works once.
+    await chatAs(7002).text(`/start ${token}`);
+    expect(lastText()).toBe(
+      "This invite link is no longer valid: it was used already or it expired. Ask an admin for a new one."
+    );
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM team_members").first()).toEqual({ n: 2 });
   });
 
-  it("tells the admin to ask a new member to open the bot", async () => {
+  it("tells someone on the team that they already are, and keeps the link usable", async () => {
+    await addAdmin(ADMIN);
+    const token = await createInvite();
+    await chatAs(ADMIN).text(`/start ${token}`);
+    expect(lastText()).toMatch(/^You're already on the team\.\n\nAvailable commands:/);
+    await chatAs(MEMBER).text(`/start ${token}`);
+    expect(textsTo(MEMBER)[0]).toMatch(/^👋 Welcome to the team, Test!/);
+  });
+
+  it("refuses an unknown link", async () => {
+    await addAdmin(ADMIN);
+    await chatAs(MEMBER).text("/start inv_doesnotexist");
+    expect(lastText()).toMatch(/^This invite link is no longer valid/);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM team_members").first()).toEqual({ n: 1 });
+  });
+
+  it("makes no link in a group, but points the admin to a private chat", async () => {
+    await addAdmin(ADMIN);
+    const group = groupChat();
+    await group.as(ADMIN).text("/invite");
+    const message = sent[sent.length - 1];
+    expect(message.text).toBe(
+      "Invite links are made in a private chat with me, so nobody else in this group can use them."
+    );
+    expect(buttonsOf(message)).toEqual([
+      { text: "Open private chat", url: `https://t.me/${BOT_USERNAME}?start=invite` }
+    ]);
+    expect(group.sessionOf(ADMIN)).toBeUndefined();
+    expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM team_invites").first()).toEqual({ n: 0 });
+
+    // That button opens the private chat with /start invite.
+    await chatAs(ADMIN).text("/start invite");
+    expect(lastText()).toBe("Which Bitcoin communities will the new team member join?");
+  });
+
+  it("is only for admins, also through the private chat button", async () => {
+    await addAdmin(ADMIN);
+    await addMember(MEMBER);
+    await chatAs(MEMBER).text("/start invite");
+    expect(lastText()).toBe("Only admins can manage team members.");
+  });
+
+  it("can also be made from the /teammember menu, without communities", async () => {
     await addAdmin(ADMIN);
     const chat = chatAs(ADMIN);
-    await chat.text("/invite");
-    await chat.text(String(MEMBER));
-    await chat.text("Erin");
-    await chat.text("Europe/Amsterdam");
+    await chat.text("/teammember");
+    await chat.press("invite_new");
     await chat.press("skip");
-    await chat.text("confirm");
-    expect(lastText()).toBe('✅ "Erin" added as team member. Ask them to open the bot and send /help.');
+    expect(lastText()).toMatch(INVITE_LINK);
+    expect(lastText()).not.toContain("They will join");
+  });
+});
+
+describe("/teammember: show team", () => {
+  it("lists the members with their username and admin rights", async () => {
+    await addAdmin(ADMIN);
+    await addMember(MEMBER, "Erin");
+    await env.DB.prepare("UPDATE team_members SET telegram_username = 'erin_db' WHERE telegram_id = ?")
+      .bind(String(MEMBER))
+      .run();
+    const chat = chatAs(ADMIN);
+    await chat.text("/teammember");
+    await chat.press("show_team");
+    expect(lastText()).toBe("👥 Team (2):\n• Admin · admin\n• Erin (@erin_db)");
+  });
+});
+
+describe("Telegram usernames", () => {
+  it("are kept current from what Telegram reports", async () => {
+    await addAdmin(ADMIN);
+    const memberId = (await addMember(MEMBER, "Erin"))!;
+    await chatAs(MEMBER, { username: "erin_db" }).text("/help");
+    const username = () =>
+      env.DB.prepare("SELECT telegram_username FROM team_members WHERE id = ?")
+        .bind(memberId)
+        .first("telegram_username");
+    expect(await username()).toBe("erin_db");
+    await chatAs(MEMBER).text("/help");
+    expect(await username()).toBeNull();
+  });
+
+  it("tell members apart in the member buttons", async () => {
+    await addAdmin(ADMIN);
+    const erin = (await addMember(MEMBER, "Erin"))!;
+    await addMember(7002, "Erin");
+    await env.DB.prepare("UPDATE team_members SET telegram_username = 'erin_db' WHERE id = ?").bind(erin).run();
+    const chat = chatAs(ADMIN);
+    await chat.text("/teammember");
+    await chat.press("remove_member");
+    expect(lastButtons()).toEqual(["Admin", "Erin (@erin_db)", "Erin (7002)"]);
   });
 });
 

@@ -47,6 +47,7 @@ const DATA_TABLES = [
   "contact_emails",
   "contacts",
   "organizations",
+  "team_invites",
   "team_member_communities",
   "team_members"
 ];
@@ -175,9 +176,16 @@ export function sessionOf(chatId: number, userId: number = chatId) {
 
 type Chat = { id: number; type: string };
 
+// What a user's Telegram profile says about them; first_name is always set in Telegram.
+export interface Profile {
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+}
+
 // One Telegram user in one chat.
-function userIn(chat: Chat, userId: number) {
-  const user = { id: userId, is_bot: false, first_name: "Test" };
+function userIn(chat: Chat, userId: number, profile: Profile = {}) {
+  const user = { id: userId, is_bot: false, first_name: "Test", ...profile };
   return {
     text: (text: string, { secret }: { secret?: string | null } = {}) =>
       deliver({ message: { message_id: ++nextId, from: user, chat, date: 0, text } }, secret),
@@ -196,8 +204,8 @@ function userIn(chat: Chat, userId: number) {
 }
 
 // A private chat with one Telegram user; chat id equals user id, as in Telegram.
-export function chatAs(userId: number) {
-  return userIn({ id: userId, type: "private" }, userId);
+export function chatAs(userId: number, profile?: Profile) {
+  return userIn({ id: userId, type: "private" }, userId, profile);
 }
 
 // A group chat: groupChat(id).as(userId) sends as one of its members.
@@ -205,7 +213,7 @@ export function groupChat(chatId = -1001234567890) {
   const chat = { id: chatId, type: "supergroup" };
   return {
     id: chatId,
-    as: (userId: number) => userIn(chat, userId),
+    as: (userId: number, profile?: Profile) => userIn(chat, userId, profile),
     sessionOf: (userId: number) => sessionOf(chatId, userId)
   };
 }
