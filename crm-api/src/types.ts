@@ -13,12 +13,14 @@ export type RowId = string | number;
 export interface TeamMember {
   id: number;
   telegram_id: string;
+  // The member's @username without "@", as Telegram last reported it; null without one.
+  telegram_username: string | null;
   name: string | null;
   time_zone: string | null;
   is_admin: 0 | 1;
 }
 
-export type TeamMemberSummary = Pick<TeamMember, "id" | "telegram_id" | "name" | "is_admin">;
+export type TeamMemberSummary = Pick<TeamMember, "id" | "telegram_id" | "telegram_username" | "name" | "is_admin">;
 
 export interface Community {
   id: number;
@@ -63,6 +65,43 @@ export interface AddTeamMemberInput extends FirstUserInput {
   invited_by: RowId | null;
 }
 
+export interface CreateInviteInput {
+  // The communities the new member joins.
+  community_ids?: RowId[];
+  invited_by: RowId | null;
+}
+
+export interface Invite {
+  // The start parameter of the invite link: t.me/<bot>?start=<token>
+  token: string;
+  // Unix time in milliseconds
+  expires_at: number;
+}
+
+// The Telegram user who opened an invite link, as Telegram describes them.
+export interface AcceptInviteInput {
+  token: string;
+  telegram_id: TelegramId;
+  name: string;
+  telegram_username?: string | null;
+}
+
+export interface AcceptedInvite {
+  // team_members.id of the new member, or of the member who already had access.
+  id: number;
+  // The Telegram user already was a team member; the invite stays unused.
+  existing?: true;
+  // Who created the invite, to tell them the member joined; null when they have no access anymore.
+  invited_by: Pick<TeamMember, "telegram_id" | "name"> | null;
+  // Names of the communities the new member joined.
+  communities: string[];
+}
+
+export interface SetTelegramUsernameInput {
+  telegram_id: TelegramId;
+  telegram_username: string | null;
+}
+
 export interface UpdateTeamMemberInput {
   team_member_id: RowId;
   name?: string | null;
@@ -94,6 +133,8 @@ export interface NewContactInput {
   // name and status are required; created_by of the contact is also used for the organization.
   new_organization?: Omit<NewOrgInput, "created_by"> | null;
   email?: string | null;
+  // International, e.g. "+31 6 1234 5678" or "0031612345678"; stored as "+31612345678" (E.164).
+  // Anything else, such as a national number, is refused.
   phone?: string | null;
   nostr_npub?: string | null;
   created_by?: RowId | null;
