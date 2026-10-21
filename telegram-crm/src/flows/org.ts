@@ -1,11 +1,6 @@
-import { isValidOrganizationName } from "../helpers/validation";
+import { INVALID_ORGANIZATION_NAME, isValidOrganizationName } from "../helpers/validation";
 import { errorMessage } from "../helpers/messaging";
-import {
-  ORG_MAX_RESULTS,
-  INVALID_ORGANIZATION_NAME,
-  handleOrganizationStep,
-  startOrganizationSteps
-} from "./organization";
+import { ORG_MAX_RESULTS, handleOrganizationStep, startOrganizationSteps } from "./organization";
 import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
 
 const NAME_PROMPT = "What is the name of the organization?";

@@ -60,11 +60,6 @@ export interface FirstUserInput {
   time_zone?: string | null;
 }
 
-export interface AddTeamMemberInput extends FirstUserInput {
-  community_ids?: RowId[];
-  invited_by: RowId | null;
-}
-
 export interface CreateInviteInput {
   // The communities the new member joins.
   community_ids?: RowId[];
@@ -155,6 +150,72 @@ export interface LogConversationInput {
   channel: string;
   note?: string | null;
   created_by?: RowId | null;
+}
+
+// For updateContact and updateOrg: a field that is left out stays as it is; null or "" removes
+// an optional detail. The name cannot be removed.
+export interface UpdateContactInput {
+  contact_id: RowId;
+  name?: string;
+  // Replaces the contact's first email address (or adds one); null removes it.
+  email?: string | null;
+  // Replaces the contact's first phone number (or adds one); null removes it. International,
+  // as for newContact.
+  phone?: string | null;
+  nostr_npub?: string | null;
+  updated_by?: RowId | null;
+}
+
+export interface UpdateOrgInput {
+  organization_id: RowId;
+  name?: string;
+  // An organization_statuses id; it cannot be removed.
+  status?: RowId;
+  website?: string | null;
+  nostr_npub?: string | null;
+  updated_by?: RowId | null;
+}
+
+export interface ConversationSummary {
+  id: number;
+  contact_id: number;
+  contact_name: string;
+  // The channel's label, e.g. "In Person".
+  channel: string;
+  note: string | null;
+  // When it was logged, "YYYY-MM-DD HH:MM:SS" in UTC; null when that is not known.
+  logged_at: string | null;
+  // The name of the team member who logged it; null when that is not known.
+  logged_by: string | null;
+}
+
+export interface ContactDetails {
+  id: number;
+  name: string;
+  type: string | null;
+  type_label: string | null;
+  organization_id: number | null;
+  organization_name: string | null;
+  nostr_npub: string | null;
+  // In the order they were added; updateContact changes the first.
+  emails: string[];
+  phones: string[];
+  // The most recent first.
+  conversations: ConversationSummary[];
+}
+
+export interface OrganizationDetails {
+  id: number;
+  name: string;
+  status: number | null;
+  status_label: string | null;
+  website: string | null;
+  nostr_npub: string | null;
+  location_osm_id: string | null;
+  communities: string[];
+  contacts: { id: number; name: string }[];
+  // With any of its contacts, the most recent first.
+  conversations: ConversationSummary[];
 }
 
 export interface OrganizationSearch {

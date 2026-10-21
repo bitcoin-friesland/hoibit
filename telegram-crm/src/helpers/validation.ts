@@ -16,6 +16,10 @@ export function isValidOrganizationName(name: string | undefined): name is strin
   return !!name && /\p{L}/u.test(name) && !name.includes("@") && !/\p{Cc}/u.test(name);
 }
 
+// What isValidOrganizationName asks for, to tell the user.
+export const INVALID_ORGANIZATION_NAME =
+  "Please enter a valid organization name (organization names should be words, not a phone number or symbols).";
+
 export function isValidEmail(email: string | undefined): email is string {
   return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }

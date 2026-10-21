@@ -3,16 +3,16 @@
  * organization of an entrepreneur (existing or new), then the overview card with the optional
  * details and Save (see flows/organization.ts and helpers/card.ts).
  */
-import { isValidName, isValidOrganizationName, NAME_RULE, toInternationalPhone } from "../helpers/validation";
+import {
+  INVALID_ORGANIZATION_NAME,
+  isValidName,
+  isValidOrganizationName,
+  NAME_RULE,
+  toInternationalPhone
+} from "../helpers/validation";
 import { setStep } from "../helpers/session";
 import { errorMessage, promptWithOptions } from "../helpers/messaging";
-import {
-  ORG_MAX_RESULTS,
-  INVALID_ORGANIZATION_NAME,
-  handleOrganizationStep,
-  showRecordCard,
-  startOrganizationSteps
-} from "./organization";
+import { ORG_MAX_RESULTS, handleOrganizationStep, showRecordCard, startOrganizationSteps } from "./organization";
 import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
 
 // Existing contacts shown when the new name resembles theirs.
