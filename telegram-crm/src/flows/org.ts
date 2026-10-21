@@ -3,7 +3,6 @@ import { errorMessage } from "../helpers/messaging";
 import {
   ORG_MAX_RESULTS,
   INVALID_ORGANIZATION_NAME,
-  errorText,
   handleOrganizationStep,
   startOrganizationSteps
 } from "./organization";
@@ -45,7 +44,8 @@ async function handleName(
   try {
     found = await env.crmApi.searchOrganizations({ name });
   } catch (e) {
-    await sendMessage(env, chatId, errorMessage(`Error searching organizations: ${errorText(e)}`));
+    console.error("Searching organizations failed", e);
+    await sendMessage(env, chatId, errorMessage("Searching organizations failed. Please type the name again."));
     return;
   }
   if (found.length === 0) {

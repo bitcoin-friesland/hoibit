@@ -13,6 +13,8 @@ export interface SendOptions {
   parse_mode?: "HTML";
   // The step also takes a typed answer besides the buttons; in a group the bot then says how.
   accepts_text?: boolean;
+  // For messages with links that need no preview, such as the OpenStreetMap places.
+  link_preview_options?: { is_disabled: true };
   // After a button press: replace the message with the pressed button instead of sending a new
   // one, for a keyboard that changes in place such as the community picker.
   replace?: boolean;
@@ -51,7 +53,14 @@ export interface Session {
   phone?: string | null;
   nostr_npub?: string | null;
   type?: "consumer" | "entrepreneur";
+  // A phone number from a Telegram contact the user shared instead of typing the name
+  shared_phone?: string;
   pending_org?: string;
+  // the existing organization the contact belongs to
+  organization_id?: number;
+  organization_label?: string;
+  // the overview card: the detail being entered (see helpers/card.ts)
+  card_field?: string;
   org_choices?: Record<string, string>;
   organization?: string;
   organization_status?: string;
@@ -60,6 +69,8 @@ export interface Session {
   org_picker?: CommunityPicker;
   organization_communities?: PickedCommunity[];
   osm_options?: string[];
+  // the name OpenStreetMap is searched for, when the user chose another than the organization's
+  osm_name?: string;
 
   // conversation flow
   contact_choices?: Record<string, string>;
@@ -120,6 +131,8 @@ export interface TelegramUpdate {
     chat?: { id: number; type: string };
     from?: TelegramUser;
     text?: string;
+    // A contact the user shared from their Telegram contacts.
+    contact?: { phone_number: string; first_name: string; last_name?: string };
   };
   callback_query?: {
     id: string;

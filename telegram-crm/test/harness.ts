@@ -166,7 +166,11 @@ export async function resetAndStubFetch({ nominatim = [] as object[] } = {}): Pr
       return Response.json({ ok: true, result: true });
     }
     if (url.startsWith("https://nominatim.openstreetmap.org/")) return Response.json(nominatim);
-    if (url.startsWith("https://overpass-api.de/")) return Response.json({ elements: [] });
+    if (url.startsWith("https://overpass-api.de/")) {
+      // Recorded among the Bot API calls, so tests can check what was searched for.
+      calls.push({ method: "overpass", body: { data: new URLSearchParams(String(init?.body)).get("data") } });
+      return Response.json({ elements: [] });
+    }
     throw new Error(`Unexpected fetch in test: ${url}`);
   });
   return sent;
@@ -250,6 +254,9 @@ function userIn(chat: Chat, userId: number, profile: Profile = {}) {
   return {
     text: (text: string, { secret }: { secret?: string | null } = {}) =>
       deliver({ message: { message_id: ++nextId, from: user, chat, date: 0, text } }, secret),
+    // Shares a contact from the user's Telegram contacts, as a message without text.
+    shareContact: (contact: { phone_number: string; first_name: string; last_name?: string }) =>
+      deliver({ message: { message_id: ++nextId, from: user, chat, date: 0, contact } }),
     // Presses a button on message messageId; by default on the newest message in this chat
     // that still has buttons (a fresh id when there is none). Telegram sends the message along.
     press: (data: string, { messageId }: { messageId?: number } = {}) => {

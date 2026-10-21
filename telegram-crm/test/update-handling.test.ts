@@ -44,9 +44,6 @@ const privateMessage = (updateId: number, text: string) =>
 async function toOrganizationStep(chat: ReturnType<typeof chatAs>, name: string) {
   await chat.text("/newcontact");
   await chat.text(name);
-  await chat.press("skip");
-  await chat.press("skip");
-  await chat.press("skip");
   await chat.press("entrepreneur");
 }
 
@@ -91,17 +88,16 @@ describe("input routing", () => {
     expect(sessionOf(ADMIN)).toMatchObject({ step: "awaiting_organization" });
   });
 
-  it("T16 a double-tapped Skip on the organization npub does not also skip the community picker", async () => {
+  it("T16 a double-tapped button on the community picker does not also save from the card", async () => {
     await addAdmin(ADMIN);
     const chat = chatAs(ADMIN);
     await toOrganizationStep(chat, "Bob");
     await chat.text("Cafe Satoshi");
     await chat.press("create_org");
     await chat.press("accepts-bitcoin");
-    await chat.press("skip"); // website
-    const npubPrompt = lastKeyboardMessageId(ADMIN);
-    await chat.press("skip", { messageId: npubPrompt }); // npub
-    await chat.press("skip", { messageId: npubPrompt }); // the same npub button, tapped twice
+    const picker = lastKeyboardMessageId(ADMIN);
+    await chat.press("skip", { messageId: picker }); // no community
+    await chat.press("skip", { messageId: picker }); // the same button, tapped twice
     const orgs = await env.DB.prepare("SELECT COUNT(*) AS n FROM organizations").first();
     expect(orgs).toEqual({ n: 0 });
     expect(lastAnswer()).toMatchObject({ text: "This button is no longer active." });
@@ -134,7 +130,7 @@ describe("input routing", () => {
     await chatAs(ADMIN).text("Alice");
     expect(sent.map(m => [m.text, m.reply_parameters])).toEqual([
       ["What is the contact name?", undefined],
-      ["What is the email address of the contact? (optional)", undefined]
+      ["Is Alice a consumer or an entrepreneur?", undefined]
     ]);
     expect(sent[0].reply_markup).toBeUndefined();
   });
@@ -177,7 +173,7 @@ describe("group chats", () => {
     await group.as(ADMIN).text("/newcontact");
     await group.as(MEMBER).text("/neworg");
     await group.as(ADMIN).text("Alice");
-    expect(group.sessionOf(ADMIN)).toMatchObject({ mode: "contact", name: "Alice", step: "awaiting_email" });
+    expect(group.sessionOf(ADMIN)).toMatchObject({ mode: "contact", name: "Alice", step: "awaiting_type" });
     expect(group.sessionOf(MEMBER)).toMatchObject({ mode: "org", step: "awaiting_org_name" });
   });
 
@@ -186,12 +182,12 @@ describe("group chats", () => {
     await addMember(MEMBER);
     const group = groupChat();
     await group.as(ADMIN).text("/newcontact");
-    await group.as(ADMIN).text("Alice"); // email prompt with a Skip button
+    await group.as(ADMIN).text("Alice"); // consumer or entrepreneur, as buttons
     const before = sent.length;
-    await group.as(MEMBER).press("skip");
+    await group.as(MEMBER).press("consumer");
     expect(sent).toHaveLength(before);
     expect(lastAnswer()).toMatchObject({ text: "This button has expired. Start again with /help." });
-    expect(group.sessionOf(ADMIN)).toMatchObject({ step: "awaiting_email" });
+    expect(group.sessionOf(ADMIN)).toMatchObject({ step: "awaiting_type" });
   });
 
   it("asks a question without buttons as a reply to the member who started the flow", async () => {
@@ -208,12 +204,15 @@ describe("group chats", () => {
     const admin = groupChat().as(ADMIN);
     await admin.text("/newcontact");
     await admin.text("Alice");
+    await admin.press("consumer");
+    await admin.press("card:email");
     const question = sent[sent.length - 1];
-    expect(question.text).toBe(
-      "What is the email address of the contact? (optional)\n\n↩️ To type an answer, reply to this message."
-    );
+    expect(question.text).toBe("What is the email address?\n\n↩️ To type an answer, reply to this message.");
     expect(JSON.parse(question.reply_markup!)).toEqual({
-      inline_keyboard: [[{ text: "Skip", callback_data: "skip" }], [{ text: "✖️ Cancel", callback_data: "cancel" }]]
+      inline_keyboard: [
+        [{ text: "⬅️ Back", callback_data: "card:back" }],
+        [{ text: "✖️ Cancel", callback_data: "cancel" }]
+      ]
     });
   });
 
@@ -222,10 +221,7 @@ describe("group chats", () => {
     const admin = groupChat().as(ADMIN);
     await admin.text("/newcontact");
     await admin.text("Alice");
-    await admin.press("skip");
-    await admin.press("skip");
-    await admin.press("skip");
-    expect(lastText()).toBe("What type of contact is this?");
+    expect(lastText()).toBe("Is Alice a consumer or an entrepreneur?");
   });
 
   it("asks for a reply after a button press, without a message to answer", async () => {
@@ -388,12 +384,13 @@ describe("webhook handling", () => {
     const store = storeFor(memoryKv());
     await processUpdate(workerEnv, store, privateMessage(1, "/newcontact"));
     await processUpdate(workerEnv, store, privateMessage(2, "Alice"));
-    await processUpdate(workerEnv, store, privateMessage(3, "alice@example.com"));
-    const phone = privateMessage(4, "+31612345678");
-    await processUpdate(workerEnv, store, phone);
-    await processUpdate(workerEnv, store, phone); // Telegram redelivers after a non-2xx or slow response
+    const type = privateMessage(3, "entrepreneur");
+    await processUpdate(workerEnv, store, type);
+    await processUpdate(workerEnv, store, type); // Telegram redelivers after a non-2xx or slow response
+    // Handled twice, "entrepreneur" would also have been searched as the organization's name.
     const session = store.getSession(ADMIN);
-    expect({ step: session?.step, nostr: session?.nostr_npub }).toEqual({ step: "awaiting_nostr", nostr: undefined });
+    expect(session?.step).toBe("awaiting_organization");
+    expect(session?.pending_org).toBeUndefined();
   });
 
   it("T7b a redelivered webhook request sends nothing again", async () => {

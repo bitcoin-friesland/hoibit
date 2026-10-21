@@ -54,10 +54,12 @@ describe("/newcontact", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     await chat.text("Alice");
-    await chat.text("alice@example.com");
-    await chat.text("+31612345678");
-    await chat.press("skip");
     await chat.press("consumer");
+    await chat.press("card:email");
+    await chat.text("alice@example.com");
+    await chat.press("card:phone");
+    await chat.text("06 12345678");
+    await chat.press("card:save");
     expect(lastText()).toBe('✅ Contact "Alice" added.');
 
     const contact = await env.DB.prepare(
@@ -82,23 +84,21 @@ describe("/newcontact", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     await chat.text("Bob");
-    await chat.press("skip");
-    await chat.press("skip");
-    await chat.press("skip");
     await chat.press("entrepreneur");
     await chat.text("Cafe Satoshi");
     expect(lastText()).toBe('No organization found with the name "Cafe Satoshi".');
     await chat.press("create_org");
     await chat.press("accepts-bitcoin");
-    await chat.text("https://cafe.example");
-    await chat.press("skip");
     await chat.press("choose_other");
     await chat.press("country:0");
     // The picker shows the country in the same message; press its first community.
     const keyboard = lastKeyboardMessage(ADMIN)!.reply_markup!.inline_keyboard;
     await chat.press(keyboard[0][0].callback_data!);
     await chat.press("done");
-    expect(lastText()).toMatch(/^✅ Organization "Cafe Satoshi" and contact "Bob" added\. \(communities: .+\)$/);
+    await chat.press("card:organization_website");
+    await chat.text("https://cafe.example");
+    await chat.press("card:save");
+    expect(lastText()).toMatch(/^✅ Organization "Cafe Satoshi" and contact "Bob" added\. \(communities: .+\)\n/);
 
     const row = await env.DB.prepare(
       `SELECT o.name, o.status, o.website, c.name AS contact, COUNT(oc.community_id) AS communities
@@ -123,13 +123,12 @@ describe("/newcontact", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     await chat.text("Carol");
-    await chat.press("skip");
-    await chat.press("skip");
-    await chat.press("skip");
     await chat.press("entrepreneur");
     await chat.text("satoshi");
     expect(lastText()).toBe("Select an existing organization or create new:");
     await chat.press(`select_org:${orgId}`);
+    expect(lastText()).toContain("🏢 Cafe Satoshi");
+    await chat.press("card:save");
     expect(lastText()).toBe('✅ Contact "Carol" added to "Cafe Satoshi".');
     const contact = await env.DB.prepare("SELECT organization_id FROM contacts WHERE name = 'Carol'").first();
     expect(contact).toEqual({ organization_id: orgId });
@@ -153,21 +152,17 @@ describe("/newcontact", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     await chat.text("Dave");
-    await chat.press("skip");
-    await chat.press("skip");
-    await chat.press("skip");
     await chat.press("entrepreneur");
     await chat.text("Cafe Satoshi");
     await chat.press("create_org");
     await chat.press("accepts-bitcoin");
-    await chat.text("https://cafe.example");
     await chat.press("skip");
-    await chat.press("skip");
+    await chat.press("card:save");
     const choice = sent[sent.length - 1];
     expect(choice.parse_mode).toBe("HTML");
-    expect(choice.text).toContain("<b>Address:</b> Nieuwestad, Leeuwarden");
+    expect(choice.text).toContain("<b>1. Cafe Satoshi</b>\ncafe · Nieuwestad, Leeuwarden");
     await chat.press("osmnode:node/42");
-    expect(lastText()).toBe('✅ Organization "Cafe Satoshi" and contact "Dave" added. (OpenStreetMap: node/42)');
+    expect(lastText()).toBe('✅ Organization "Cafe Satoshi" and contact "Dave" added. (📍 location linked)');
     const org = await env.DB.prepare("SELECT location_osm_id FROM organizations").first();
     expect(org).toEqual({ location_osm_id: "node/42" });
   });

@@ -27,6 +27,15 @@ const buttonsOf = (messageId: number) =>
     ?.reply_markup?.inline_keyboard.flat()
     .map(b => b.text) ?? [];
 
+// /newcontact for consumer Alice, up to the question for her email address.
+async function toEmailQuestion(chat: ReturnType<typeof chatAs>) {
+  await chat.text("/newcontact");
+  await chat.text("Alice");
+  await chat.press("consumer");
+  await chat.press("card:email");
+  return lastKeyboardMessage(ADMIN)!.message_id;
+}
+
 describe("answered questions", () => {
   it("show the pressed button below the question and lose their buttons", async () => {
     await addAdmin(ADMIN);
@@ -34,36 +43,30 @@ describe("answered questions", () => {
     await chat.text("/newcontact");
     await chat.text("Alice");
     const question = lastKeyboardMessage(ADMIN)!.message_id;
-    await chat.press("skip");
-    expect(messageById(question)).toMatchObject({
-      text: "What is the email address of the contact? (optional)\n\n➡️ Skip"
-    });
+    await chat.press("consumer");
+    expect(messageById(question)).toMatchObject({ text: "Is Alice a consumer or an entrepreneur?\n\n➡️ Consumer" });
     expect(buttonsOf(question)).toEqual([]);
-    expect(lastText()).toBe("What is the phone number of the contact? (must start with + or 00, optional)");
+    expect(lastText()).toMatch(/^New contact:/);
   });
 
   it("lose their buttons when answered by text", async () => {
     await addAdmin(ADMIN);
     const chat = chatAs(ADMIN);
-    await chat.text("/newcontact");
-    await chat.text("Alice");
-    const question = lastKeyboardMessage(ADMIN)!.message_id;
+    const question = await toEmailQuestion(chat);
     await chat.text("alice@example.com");
-    expect(messageById(question)?.text).toBe("What is the email address of the contact? (optional)");
+    expect(messageById(question)?.text).toBe("What is the email address?");
     expect(buttonsOf(question)).toEqual([]);
   });
 
   it("keep their buttons when the answer is refused", async () => {
     await addAdmin(ADMIN);
     const chat = chatAs(ADMIN);
-    await chat.text("/newcontact");
-    await chat.text("Alice");
-    const question = lastKeyboardMessage(ADMIN)!.message_id;
+    const question = await toEmailQuestion(chat);
     await chat.text("not an email");
     expect(lastText()).toMatch(/^❌ /);
-    expect(buttonsOf(question)).toEqual(["Skip", "✖️ Cancel"]);
-    await chat.press("skip", { messageId: question });
-    expect(sessionOf(ADMIN)).toMatchObject({ step: "awaiting_phone" });
+    expect(buttonsOf(question)).toEqual(["⬅️ Back", "✖️ Cancel"]);
+    await chat.press("card:back", { messageId: question });
+    expect(sessionOf(ADMIN)).toMatchObject({ step: "awaiting_card" });
   });
 });
 
@@ -74,8 +77,6 @@ describe("community picker", () => {
     await chat.text("/neworg");
     await chat.text("Cafe Satoshi");
     await chat.press("accepts-bitcoin");
-    await chat.press("skip");
-    await chat.press("skip");
     const picker = lastKeyboardMessage(ADMIN)!.message_id;
     const before = sent.length;
     await chat.press("choose_other");
@@ -95,9 +96,7 @@ describe("cancel", () => {
   it("is a button on every question with buttons, and ends the flow", async () => {
     await addAdmin(ADMIN);
     const chat = chatAs(ADMIN);
-    await chat.text("/newcontact");
-    await chat.text("Alice");
-    const question = lastKeyboardMessage(ADMIN)!.message_id;
+    const question = await toEmailQuestion(chat);
     await chat.press("cancel");
     expect(sessionOf(ADMIN)).toBeUndefined();
     expect(messageById(question)?.text).toMatch(/\n\n➡️ Cancelled$/);
@@ -167,10 +166,8 @@ describe("log conversation button", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     await chat.text("Alice");
-    await chat.press("skip");
-    await chat.press("skip");
-    await chat.press("skip");
     await chat.press("consumer");
+    await chat.press("card:save");
     expect(lastText()).toBe('✅ Contact "Alice" added.');
     expect(buttonsOf(lastKeyboardMessage(ADMIN)!.message_id)).toEqual(["💬 Log conversation with Alice"]);
     await chat.press(JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard[0][0].callback_data);

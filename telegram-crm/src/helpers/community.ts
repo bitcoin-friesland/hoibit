@@ -69,18 +69,19 @@ function communityButton(state: CommunityPicker, id: number) {
 /**
  * Returns [text, options] for the current view, ready for sendMessage(env, chatId, ...).
  * title is shown on the main view (own communities + selections from other countries).
- * replace redraws the picker in place after one of its buttons was pressed.
+ * replace redraws the picker in place after one of its buttons was pressed. skipLabel names
+ * the "skip" button: what skipping means where the picker is used.
  */
 export function renderCommunityPicker(
   state: CommunityPicker,
   title: string,
-  { replace = false } = {}
+  { replace = false, skipLabel = "Skip" } = {}
 ): [string, SendOptions] {
-  const [text, keyboard] = pickerView(state, title);
+  const [text, keyboard] = pickerView(state, title, skipLabel);
   return [text, { reply_markup: { inline_keyboard: keyboard }, ...(replace ? { replace } : {}) }];
 }
 
-function pickerView(state: CommunityPicker, title: string): [string, InlineKeyboardButton[][]] {
+function pickerView(state: CommunityPicker, title: string, skipLabel: string): [string, InlineKeyboardButton[][]] {
   if (state.countryIds) {
     const rows = state.countryIds.map(id => communityButton(state, id));
     rows.push(
@@ -99,7 +100,7 @@ function pickerView(state: CommunityPicker, title: string): [string, InlineKeybo
   rows.push(
     [{ text: "Choose other communities", callback_data: "choose_other" }],
     [{ text: "Done", callback_data: "done" }],
-    [{ text: "Skip", callback_data: "skip" }]
+    [{ text: skipLabel, callback_data: "skip" }]
   );
   return [title, rows];
 }

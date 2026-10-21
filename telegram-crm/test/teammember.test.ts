@@ -154,7 +154,7 @@ describe("/teammember: edit existing team member", () => {
     await chat.press("edit_field:name");
     expect(lastText()).toBe("Please enter the new name for Erin:");
     await chat.text("x");
-    expect(lastText()).toMatch(/^❌ Please enter a valid name/);
+    expect(lastText()).toBe("❌ Please enter a name of at least 2 letters, without digits or @.");
     await chat.text("Erin Østergaard");
     expect(lastText()).toBe('✅ Name of Erin changed to "Erin Østergaard".');
     expect(await memberRow(memberId)).toMatchObject({ name: "Erin Østergaard" });

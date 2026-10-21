@@ -3,13 +3,12 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { CLEANUP_AFTER_MS, RECENT_UPDATE_IDS, SESSION_TTL_MS, UNAUTHORIZED_NOTICE_TTL_MS, storeFor } from "../src/chat";
 import { createSerialQueue } from "../src/helpers/queue";
 import worker from "../src/index";
-import { addAdmin, chatAs, memoryKv, resetAndStubFetch, SECRET, sessionOf, type SentMessage } from "./harness";
+import { addAdmin, chatAs, memoryKv, resetAndStubFetch, SECRET, sessionOf } from "./harness";
 
 const ADMIN = 5001;
-let sent: SentMessage[];
 
 beforeEach(async () => {
-  sent = await resetAndStubFetch();
+  await resetAndStubFetch();
 });
 
 describe("storeFor", () => {
@@ -78,12 +77,9 @@ describe("updates arriving together in one chat", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     // Delivered at the same time, as Telegram does with parallel webhook connections.
-    // Without the per-chat queue both read step awaiting_name, and the email is rejected as a name.
-    await Promise.all([chat.text("Alice"), chat.text("alice@example.com")]);
-    expect(sessionOf(ADMIN)).toMatchObject({ name: "Alice", email: "alice@example.com", step: "awaiting_phone" });
-    expect(sent.map(m => m.text)).not.toContain(
-      "❌ Please enter a valid contact name (minimum 3 letters, only alphabetic)."
-    );
+    // Without the per-chat queue both read step awaiting_name, and the type is taken for a name.
+    await Promise.all([chat.text("Alice"), chat.text("consumer")]);
+    expect(sessionOf(ADMIN)).toMatchObject({ name: "Alice", type: "consumer", step: "awaiting_card" });
   });
 });
 

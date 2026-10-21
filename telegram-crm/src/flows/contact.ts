@@ -1,43 +1,48 @@
-import { isValidName, isValidEmail, isValidPhone, isValidNpub, isValidOrganizationName } from "../helpers/validation";
+/**
+ * /newcontact: the name (checked against existing contacts), consumer or entrepreneur, the
+ * organization of an entrepreneur (existing or new), then the overview card with the optional
+ * details and Save (see flows/organization.ts and helpers/card.ts).
+ */
+import { isValidName, isValidOrganizationName, NAME_RULE, toInternationalPhone } from "../helpers/validation";
 import { setStep } from "../helpers/session";
-import { errorMessage, successMessage, promptWithSkip, promptWithOptions } from "../helpers/messaging";
+import { errorMessage, promptWithOptions } from "../helpers/messaging";
 import {
   ORG_MAX_RESULTS,
   INVALID_ORGANIZATION_NAME,
-  contactInput,
-  errorText,
   handleOrganizationStep,
-  logConversationButton,
+  showRecordCard,
   startOrganizationSteps
 } from "./organization";
 import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
 
-// Saves the contact, with no organization or an existing one.
-async function addContact(
+// Existing contacts shown when the new name resembles theirs.
+const SIMILAR_MAX_RESULTS = 5;
+
+const ORGANIZATION_PROMPT = "Which organization is this contact linked to? Type part of the name.";
+
+async function askType(
   sendMessage: SendMessage,
   env: Env,
   chatId: ChatId,
   session: Session,
-  removeSession: () => Promise<void>,
-  organizationId: number | null,
-  doneText: string
+  persistSession: () => Promise<void>
 ) {
-  let contactId: number;
+  setStep(session, "awaiting_type");
+  await persistSession();
+  const prompt = promptWithOptions(`Is ${session.name} a consumer or an entrepreneur?`, [
+    { label: "Consumer", value: "consumer" },
+    { label: "Entrepreneur", value: "entrepreneur" }
+  ]);
+  await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
+}
+
+// The community of the team member, so organizations there are listed first.
+async function ownCommunityId(env: Env, session: Session) {
   try {
-    const res = await env.crmApi.newContact({ ...contactInput(session), organization_id: organizationId });
-    if (!res.ok) {
-      await sendMessage(env, chatId, errorMessage(`Failed to add contact (code ${res.status}).`));
-      await removeSession();
-      return;
-    }
-    contactId = res.id;
-  } catch (e) {
-    await sendMessage(env, chatId, errorMessage(`Error adding contact: ${errorText(e)}`));
-    await removeSession();
-    return;
+    return (await env.crmApi.teamMemberCommunities(session.telegram_id ?? ""))[0]?.id ?? null;
+  } catch {
+    return null;
   }
-  await sendMessage(env, chatId, successMessage(doneText), logConversationButton(contactId, session.name ?? ""));
-  await removeSession();
 }
 
 export const handleContactFlow: FlowHandler = async (
@@ -53,100 +58,65 @@ export const handleContactFlow: FlowHandler = async (
     case "awaiting_name": {
       const name = text && text.trim();
       if (!isValidName(name)) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please enter a valid contact name (minimum 3 letters, only alphabetic).")
-        );
+        await sendMessage(env, chatId, errorMessage(NAME_RULE));
         return;
       }
       session.name = name;
-      setStep(session, "awaiting_email");
-      await persistSession();
-      const prompt = promptWithSkip("What is the email address of the contact? (optional)");
-      await sendMessage(env, chatId, prompt.text, {
-        reply_markup: prompt.reply_markup,
-        accepts_text: prompt.accepts_text
-      });
-      break;
-    }
-    case "awaiting_email": {
-      let email = text && text.trim();
-      if (text === undefined || session.last_callback_data === "skip") {
-        email = undefined;
-      } else if (email && !isValidEmail(email)) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid email address or tap Skip."));
+      // A shared Telegram contact also brings a phone number, which Telegram sends without "+".
+      if (session.shared_phone) {
+        session.phone = toInternationalPhone(session.shared_phone.replace(/^(?=[1-9])/, "+"), "31") ?? null;
+        session.shared_phone = undefined;
+      }
+      let similar: { id: number; name: string; organization_name: string | null }[] = [];
+      try {
+        similar = (await env.crmApi.searchContacts(name)).slice(0, SIMILAR_MAX_RESULTS);
+      } catch {
+        // Not knowing about lookalikes is no reason to stop adding the contact.
+      }
+      if (similar.length === 0) {
+        await askType(sendMessage, env, chatId, session, persistSession);
         return;
       }
-      session.email = email && email.toLowerCase() !== "skip" ? email : null;
-      setStep(session, "awaiting_phone");
+      setStep(session, "awaiting_duplicate");
       await persistSession();
-      const prompt = promptWithSkip("What is the phone number of the contact? (must start with + or 00, optional)");
-      await sendMessage(env, chatId, prompt.text, {
-        reply_markup: prompt.reply_markup,
-        accepts_text: prompt.accepts_text
-      });
+      // log:<id> buttons work without this flow: they start logging a conversation instead.
+      const keyboard = similar.map(c => [
+        {
+          text: `💬 ${c.organization_name ? `${c.name} (${c.organization_name})` : c.name}`,
+          callback_data: `log:${c.id}`
+        }
+      ]);
+      keyboard.push([{ text: `➕ Add "${name}" as a new contact`, callback_data: "new_contact" }]);
+      await sendMessage(
+        env,
+        chatId,
+        "⚠️ There are contacts with a similar name. Is it one of them? Tap them to log a conversation, or add a new contact.",
+        { reply_markup: { inline_keyboard: keyboard } }
+      );
       break;
     }
-    case "awaiting_phone": {
-      let phone = text && text.trim();
-      if (text === undefined || session.last_callback_data === "skip") {
-        phone = undefined;
-      } else if (phone && !isValidPhone(phone)) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please enter a valid phone number starting with + or 00, or tap Skip.")
-        );
+    case "awaiting_duplicate": {
+      if (session.last_callback_data !== "new_contact") {
+        await sendMessage(env, chatId, errorMessage("Please tap one of the contacts, or add a new contact."));
         return;
       }
-      session.phone = phone && phone.toLowerCase() !== "skip" ? phone : null;
-      setStep(session, "awaiting_nostr");
-      await persistSession();
-      const prompt = promptWithSkip("What is the nostr npub of the contact? (optional)");
-      await sendMessage(env, chatId, prompt.text, {
-        reply_markup: prompt.reply_markup,
-        accepts_text: prompt.accepts_text
-      });
-      break;
-    }
-    case "awaiting_nostr": {
-      let nostr = text && text.trim();
-      if (text === undefined || session.last_callback_data === "skip" || nostr?.toLowerCase() === "skip") {
-        nostr = undefined;
-      } else if (nostr && !isValidNpub(nostr)) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid nostr npub (npub1…) or tap Skip."));
-        return;
-      }
-      session.nostr_npub = nostr || null;
-      setStep(session, "awaiting_type");
-      await persistSession();
-      const types = [
-        { label: "Consumer", value: "consumer" },
-        { label: "Entrepreneur", value: "entrepreneur" }
-      ];
-      const prompt = promptWithOptions("What type of contact is this?", types);
-      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
+      await askType(sendMessage, env, chatId, session, persistSession);
       break;
     }
     case "awaiting_type": {
       const type = text || session.last_callback_data;
       if (type !== "consumer" && type !== "entrepreneur") {
-        await sendMessage(env, chatId, errorMessage("Please select a valid type."));
+        await sendMessage(env, chatId, errorMessage("Please choose Consumer or Entrepreneur."));
         return;
       }
       session.type = type;
-      if (session.type === "entrepreneur") {
-        setStep(session, "awaiting_organization");
-        await persistSession();
-        await sendMessage(
-          env,
-          chatId,
-          "Which organization is this contact linked to? (required, type part of the name to search or create a new one)"
-        );
+      if (type === "consumer") {
+        await showRecordCard(sendMessage, env, chatId, session, persistSession);
         return;
       }
-      await addContact(sendMessage, env, chatId, session, removeSession, null, `Contact "${session.name}" added.`);
+      setStep(session, "awaiting_organization");
+      await persistSession();
+      await sendMessage(env, chatId, ORGANIZATION_PROMPT);
       break;
     }
     case "awaiting_organization": {
@@ -154,11 +124,10 @@ export const handleContactFlow: FlowHandler = async (
       session.last_callback_data = null;
       if (cb === "search_org_again") {
         await persistSession();
-        await sendMessage(env, chatId, "Which organization is this contact linked to?\nType part of the name.");
+        await sendMessage(env, chatId, ORGANIZATION_PROMPT);
         return;
       }
       if (cb && cb.startsWith("select_org:")) {
-        // Existing organization: link the contact to it, nothing to create
         const orgId = cb.slice("select_org:".length);
         const orgName = session.org_choices && session.org_choices[orgId];
         if (!orgName) {
@@ -169,15 +138,9 @@ export const handleContactFlow: FlowHandler = async (
           );
           return;
         }
-        await addContact(
-          sendMessage,
-          env,
-          chatId,
-          session,
-          removeSession,
-          Number(orgId),
-          `Contact "${session.name}" added to "${orgName}".`
-        );
+        session.organization_id = Number(orgId);
+        session.organization_label = orgName;
+        await showRecordCard(sendMessage, env, chatId, session, persistSession);
         return;
       }
       if (cb === "create_org") {
@@ -193,41 +156,48 @@ export const handleContactFlow: FlowHandler = async (
         await sendMessage(env, chatId, errorMessage(INVALID_ORGANIZATION_NAME));
         return;
       }
+      let found;
       try {
-        const found = await env.crmApi.searchOrganizations({ name: org });
-        const orgs = found.slice(0, ORG_MAX_RESULTS);
-        // Names stay in the session; buttons carry only ids (callback_data is limited to 64 bytes).
-        session.pending_org = org;
-        session.org_choices = Object.fromEntries(orgs.map(o => [String(o.id), o.name]));
-        await persistSession();
-        if (orgs.length > 0) {
-          const keyboard = orgs.map(o => [{ text: o.name, callback_data: `select_org:${o.id}` }]);
-          keyboard.push([{ text: `Create new "${org}"`, callback_data: "create_org" }]);
-          const more =
-            found.length > orgs.length
-              ? ` Showing ${orgs.length} of ${found.length}; type more of the name to narrow it down.`
-              : "";
-          await sendMessage(env, chatId, `Select an existing organization or create new:${more}`, {
-            reply_markup: { inline_keyboard: keyboard },
-            accepts_text: more !== ""
-          });
-        } else {
-          await sendMessage(env, chatId, `No organization found with the name "${org}".`, {
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: `Confirm and create "${org}"`, callback_data: "create_org" }],
-                [{ text: "Search again", callback_data: "search_org_again" }]
-              ]
-            }
-          });
-        }
+        found = await env.crmApi.searchOrganizations({ name: org, community_id: await ownCommunityId(env, session) });
       } catch (e) {
-        await sendMessage(env, chatId, errorMessage(`Error searching organizations: ${errorText(e)}`));
+        console.error("Searching organizations failed", e);
+        await sendMessage(env, chatId, errorMessage("Searching organizations failed. Please type the name again."));
+        return;
+      }
+      const orgs = found.slice(0, ORG_MAX_RESULTS);
+      // Names stay in the session; buttons carry only ids (callback_data is limited to 64 bytes).
+      session.pending_org = org;
+      session.org_choices = Object.fromEntries(orgs.map(o => [String(o.id), o.name]));
+      await persistSession();
+      if (orgs.length > 0) {
+        // The place tells organizations with the same name apart.
+        const keyboard = orgs.map(o => {
+          const place = o.region || o.community_name;
+          return [{ text: place ? `${o.name} · ${place}` : o.name, callback_data: `select_org:${o.id}` }];
+        });
+        keyboard.push([{ text: `Create new "${org}"`, callback_data: "create_org" }]);
+        const more =
+          found.length > orgs.length
+            ? ` Showing ${orgs.length} of ${found.length}; type more of the name to narrow it down.`
+            : "";
+        await sendMessage(env, chatId, `Select an existing organization or create new:${more}`, {
+          reply_markup: { inline_keyboard: keyboard },
+          accepts_text: more !== ""
+        });
+      } else {
+        await sendMessage(env, chatId, `No organization found with the name "${org}".`, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: `Confirm and create "${org}"`, callback_data: "create_org" }],
+              [{ text: "Search again", callback_data: "search_org_again" }]
+            ]
+          }
+        });
       }
       break;
     }
     default:
-      // The steps of a new organization (status, website, npub, communities, OpenStreetMap).
+      // The shared steps: status and communities of a new organization, the card, OpenStreetMap.
       if (await handleOrganizationStep(sendMessage, env, chatId, text, session, persistSession, removeSession)) {
         break;
       }

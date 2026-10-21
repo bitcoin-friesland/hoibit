@@ -11,16 +11,6 @@ export function successMessage(text: string) {
   return `✅ ${text}`;
 }
 
-export function promptWithSkip(
-  text: string
-): { text: string } & Required<Pick<SendOptions, "reply_markup" | "accepts_text">> {
-  return {
-    text,
-    reply_markup: { inline_keyboard: [[{ text: "Skip", callback_data: "skip" }]] },
-    accepts_text: true
-  };
-}
-
 export function promptWithOptions(
   text: string,
   options: { label: string; value: string }[]

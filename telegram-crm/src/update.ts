@@ -488,7 +488,12 @@ async function handleButton(
 async function handleMessage(env: Env, store: SessionStore, message: TelegramUpdate["message"]): Promise<UpdateResult> {
   const chatId = message?.chat?.id;
   const userId = message?.from?.id?.toString();
-  const text = message?.text?.trim();
+  // A shared Telegram contact answers "What is the contact name?" with its name; its phone
+  // number goes along in the session.
+  const shared = message?.contact;
+  const text = (
+    message?.text ?? (shared ? [shared.first_name, shared.last_name].filter(Boolean).join(" ") : "")
+  ).trim();
   // Only proceed if chatId, userId, and text exist to avoid repeated sends on non-user input updates
   if (!message || !chatId || !userId || !text) {
     return reply("Invalid input");
@@ -573,6 +578,10 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
     await sendMessage(env, chatId, ONLY_ADMINS);
     store.deleteSession(userId);
     return reply("OK");
+  }
+  if (shared) {
+    if (session.mode !== "contact" || session.step !== "awaiting_name") return reply("Contact ignored");
+    session.shared_phone = shared.phone_number;
   }
   // Text answers the current step; a button pressed earlier must not count for it.
   session.last_callback_data = null;

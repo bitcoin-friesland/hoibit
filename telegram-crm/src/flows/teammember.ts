@@ -1,4 +1,4 @@
-import { isValidName } from "../helpers/validation";
+import { isValidName, NAME_RULE } from "../helpers/validation";
 import { setStep } from "../helpers/session";
 import { errorMessage, successMessage } from "../helpers/messaging";
 import { botUsername, startLink } from "../helpers/telegram";
@@ -66,7 +66,11 @@ async function startInvite(
   session.invite_picker = await startCommunityPicker(env, session.telegram_id, [], { selectOwn: true });
   setStep(session, "awaiting_invite_community");
   await persistSession();
-  await sendMessage(env, chatId, ...renderCommunityPicker(session.invite_picker, INVITE_PICKER_TITLE));
+  await sendMessage(
+    env,
+    chatId,
+    ...renderCommunityPicker(session.invite_picker, INVITE_PICKER_TITLE, { skipLabel: "No community" })
+  );
 }
 
 // Creates the invite link for the chosen communities and gives it to the admin.
@@ -264,7 +268,11 @@ export const handleTeamMemberFlow: FlowHandler = async (
       const result = await handleCommunityPickerInput(env, picker, cb);
       await persistSession();
       if (result === "updated") {
-        await sendMessage(env, chatId, ...renderCommunityPicker(picker, INVITE_PICKER_TITLE, { replace: true }));
+        await sendMessage(
+          env,
+          chatId,
+          ...renderCommunityPicker(picker, INVITE_PICKER_TITLE, { replace: true, skipLabel: "No community" })
+        );
       } else if (result === "done" || result === "skip") {
         if (result === "done") session.pressed_answer = pickedAnswer(picker);
         await sendInviteLink(sendMessage, env, chatId, session, result === "skip" ? [] : pickedCommunities(picker));
@@ -413,7 +421,11 @@ export const handleTeamMemberFlow: FlowHandler = async (
         );
         setStep(session, "awaiting_edit_communities");
         await persistSession();
-        await sendMessage(env, chatId, ...renderCommunityPicker(session.edit_picker, editPickerTitle(label)));
+        await sendMessage(
+          env,
+          chatId,
+          ...renderCommunityPicker(session.edit_picker, editPickerTitle(label), { skipLabel: "Keep unchanged" })
+        );
       } else {
         await sendMessage(env, chatId, errorMessage("Please choose what to change from the buttons, or type /cancel."));
       }
@@ -422,7 +434,7 @@ export const handleTeamMemberFlow: FlowHandler = async (
     case "awaiting_edit_name": {
       const name = text && text.trim();
       if (!isValidName(name)) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid name (minimum 3 characters)."));
+        await sendMessage(env, chatId, errorMessage(NAME_RULE));
         return;
       }
       await saveMemberChanges(
@@ -449,7 +461,11 @@ export const handleTeamMemberFlow: FlowHandler = async (
       const result = await handleCommunityPickerInput(env, picker, cb);
       await persistSession();
       if (result === "updated") {
-        await sendMessage(env, chatId, ...renderCommunityPicker(picker, editPickerTitle(label), { replace: true }));
+        await sendMessage(
+          env,
+          chatId,
+          ...renderCommunityPicker(picker, editPickerTitle(label), { replace: true, skipLabel: "Keep unchanged" })
+        );
       } else if (result === "skip") {
         await sendMessage(env, chatId, `Communities of ${label} unchanged.`);
         await removeSession();

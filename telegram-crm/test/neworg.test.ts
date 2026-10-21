@@ -27,9 +27,6 @@ const lastKeyboard = () =>
 async function toOrganizationStep(chat: ReturnType<typeof chatAs>, name: string) {
   await chat.text("/newcontact");
   await chat.text(name);
-  await chat.press("skip");
-  await chat.press("skip");
-  await chat.press("skip");
   await chat.press("entrepreneur");
 }
 
@@ -39,8 +36,6 @@ async function toCommunityPicker(chat: ReturnType<typeof chatAs>, name: string) 
   await chat.text("Cafe Satoshi");
   await chat.press("create_org");
   await chat.press("accepts-bitcoin");
-  await chat.press("skip"); // website
-  await chat.press("skip"); // npub
 }
 
 const count = async (table: string) => (await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first())?.n;
@@ -62,7 +57,8 @@ describe("audit repro: /neworg and the new organization of /newcontact", () => {
     try {
       const chat = chatAs(ADMIN);
       await toCommunityPicker(chat, "Bob");
-      await chat.press("skip"); // communities; no OpenStreetMap results, so it saves right away
+      await chat.press("skip"); // communities
+      await chat.press("card:save"); // no OpenStreetMap results, so it saves right away
       const orgs = await env.DB.prepare("SELECT COUNT(*) AS n FROM organizations").first();
       expect(orgs).toEqual({ n: 0 });
     } finally {
@@ -79,24 +75,52 @@ describe("/neworg", () => {
     await chat.text("/neworg");
     expect(lastText()).toBe("What is the name of the organization?");
     await chat.text("Cafe Satoshi");
-    expect(lastText()).toBe("What is the Bitcoin adoption status of the organization?");
+    expect(lastText()).toBe('What is the Bitcoin status of "Cafe Satoshi"?');
+    expect(lastKeyboard().map(row => row[0].text)).toEqual([
+      "Curious about Bitcoin",
+      "Accepts Bitcoin",
+      "Not Interested",
+      "Stopped Accepting Bitcoin"
+    ]);
     await chat.press("accepts-bitcoin");
-    expect(lastText()).toBe("What is the website of the organization? (optional)");
-    await chat.text("https://cafe.example");
-    expect(lastText()).toBe("What is the nostr npub of the organization? (optional)");
-    await chat.text(NPUB);
     expect(lastText()).toBe("Select Bitcoin communities for this organization:");
+    expect(lastKeyboard().at(-1)).toEqual([{ text: "No community", callback_data: "skip" }]);
     await chat.press("choose_other");
     await chat.press("country:0");
     const community = lastKeyboard()[0][0];
     await chat.press(community.callback_data!);
     await chat.press("done");
+    expect(lastText()).toBe(
+      [
+        "New organization:",
+        "🏢 Cafe Satoshi",
+        "🏷️ Accepts Bitcoin",
+        `👥 ${community.text}`,
+        "",
+        "🌐 Website: —",
+        "🟣 Nostr: —",
+        "",
+        "Tap a detail to add it, or Save."
+      ].join("\n")
+    );
+    await chat.press("card:organization_website");
+    expect(lastText()).toBe("What is the website of the organization? For example example.com.");
+    await chat.text("https://cafe.example");
+    await chat.press("card:organization_nostr_npub");
+    await chat.text(NPUB);
+    expect(lastText()).toContain(`🌐 Website: https://cafe.example\n🟣 Nostr: ${NPUB}`);
+    await chat.press("card:save");
     const choice = sent[sent.length - 1];
     expect(choice.parse_mode).toBe("HTML");
-    expect(choice.text).toContain("<b>Address:</b> Nieuwestad, Leeuwarden");
+    expect(choice.text).toBe(
+      'Which place on OpenStreetMap is "Cafe Satoshi"?\n\n<b>1. Cafe Satoshi</b>\ncafe · Nieuwestad, Leeuwarden\n<a href="https://www.openstreetmap.org/node/42">View on the map</a>'
+    );
+    expect(lastKeyboard()[0]).toEqual([
+      { text: "1. Cafe Satoshi – Nieuwestad, Leeuwarden", callback_data: "osmnode:node/42" }
+    ]);
     await chat.press("osmnode:node/42");
     expect(lastText()).toBe(
-      `✅ Organization "Cafe Satoshi" added. (communities: ${community.text}; OpenStreetMap: node/42)`
+      `✅ Organization "Cafe Satoshi" added. (communities: ${community.text}; 📍 location linked)`
     );
     expect(sessionOf(ADMIN)).toBeUndefined();
 
@@ -127,10 +151,9 @@ describe("/neworg", () => {
     await chat.text("/neworg");
     await chat.text("’t Hoekje");
     await chat.press("btc-curious");
-    await chat.press("skip");
-    await chat.press("skip");
     await chat.press("skip"); // communities
-    expect(lastText()).toBe('✅ Organization "’t Hoekje" added.');
+    await chat.press("card:save");
+    expect(lastText()).toBe('✅ Organization "’t Hoekje" added.\nNo OpenStreetMap location was found.');
     expect(await env.DB.prepare("SELECT name, status, website, nostr_npub FROM organizations").first()).toEqual({
       name: "’t Hoekje",
       status: 1,
@@ -157,12 +180,11 @@ describe("/neworg", () => {
     expect(lastText()).toBe("What is the name of the organization?");
     await chat.text("Cafe Satoshi");
     await chat.press("create_org");
-    expect(lastText()).toBe("What is the Bitcoin adoption status of the organization?");
+    expect(lastText()).toBe('What is the Bitcoin status of "Cafe Satoshi"?');
     await chat.press("accepts-bitcoin");
     await chat.press("skip");
-    await chat.press("skip");
-    await chat.press("skip");
-    expect(lastText()).toBe('✅ Organization "Cafe Satoshi" added.');
+    await chat.press("card:save");
+    expect(lastText()).toMatch(/^✅ Organization "Cafe Satoshi" added\./);
     expect(await count("organizations")).toBe(2);
   });
 
@@ -175,22 +197,27 @@ describe("/neworg", () => {
     expect(sessionOf(ADMIN)).toMatchObject({ mode: "org", step: "awaiting_org_name" });
   });
 
-  it("reports a refused save and keeps nothing", async () => {
+  it("keeps the input after a refused save, so Save can be tapped again", async () => {
     await addAdmin(ADMIN);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const spy = vi.spyOn(CrmApi.prototype, "newOrg").mockResolvedValue({ ok: false, status: 400, error: "Bad" });
+    const chat = chatAs(ADMIN);
     try {
-      const chat = chatAs(ADMIN);
       await chat.text("/neworg");
       await chat.text("Cafe Satoshi");
       await chat.press("accepts-bitcoin");
       await chat.press("skip");
-      await chat.press("skip");
-      await chat.press("skip");
-      expect(lastText()).toBe("❌ Failed to add organization (code 400).");
-      expect(sessionOf(ADMIN)).toBeUndefined();
+      await chat.press("card:save");
+      expect(lastText()).toBe("❌ Saving failed, nothing was saved. Please try again.");
+      expect(sessionOf(ADMIN)).toMatchObject({ step: "awaiting_card", organization: "Cafe Satoshi" });
+      expect(await count("organizations")).toBe(0);
     } finally {
       spy.mockRestore();
+      error.mockRestore();
     }
+    await chat.press("card:save");
+    expect(lastText()).toMatch(/^✅ Organization "Cafe Satoshi" added\./);
+    expect(await count("organizations")).toBe(1);
   });
 });
 
@@ -202,7 +229,10 @@ describe("/newcontact with a new organization", () => {
       const chat = chatAs(ADMIN);
       await toCommunityPicker(chat, "Bob");
       await chat.press("skip");
-      expect(lastText()).toBe('✅ Organization "Cafe Satoshi" and contact "Bob" added.');
+      await chat.press("card:save");
+      expect(lastText()).toBe(
+        '✅ Organization "Cafe Satoshi" and contact "Bob" added.\nNo OpenStreetMap location was found.'
+      );
       expect(newOrg).not.toHaveBeenCalled();
     } finally {
       newOrg.mockRestore();
@@ -220,18 +250,21 @@ describe("/newcontact with a new organization", () => {
     ]);
   });
 
-  it("tells the user nothing was saved when the save fails", async () => {
+  it("tells the user nothing was saved when the save fails, without technical details", async () => {
     await addAdmin(ADMIN);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const spy = vi.spyOn(CrmApi.prototype, "newContact").mockRejectedValue(new Error("D1_ERROR: unavailable"));
     try {
       const chat = chatAs(ADMIN);
       await toCommunityPicker(chat, "Bob");
       await chat.press("skip");
-      expect(lastText()).toMatch(/^❌ .*Nothing was saved\.$/);
-      expect(sessionOf(ADMIN)).toBeUndefined();
+      await chat.press("card:save");
+      expect(lastText()).toBe("❌ Saving failed, nothing was saved. Please try again.");
+      expect(sessionOf(ADMIN)).toMatchObject({ step: "awaiting_card" });
       expect(await count("contacts")).toBe(0);
     } finally {
       spy.mockRestore();
+      error.mockRestore();
     }
   });
 });
