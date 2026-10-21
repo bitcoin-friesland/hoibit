@@ -1,34 +1,32 @@
 /**
- * The steps that describe a new organization, shared by /newcontact (an entrepreneur with a new
- * organization, session.mode "contact") and /neworg (session.mode "org"): status, website, npub,
- * communities and OpenStreetMap location, then saving. Each flow asks for the name itself and
- * calls startOrganizationSteps; from then on it hands its updates to handleOrganizationStep.
+ * The steps after the name of a new contact or organization, shared by /newcontact (session.mode
+ * "contact") and /neworg (session.mode "org"): the status and communities of a new organization,
+ * the overview card with the optional details (helpers/card.ts), the OpenStreetMap location of a
+ * new organization, and saving. Each flow asks for the name itself, then calls
+ * startOrganizationSteps or showRecordCard; from then on it hands its updates to
+ * handleOrganizationStep.
  */
-import { isValidNpub, isValidWebsite } from "../helpers/validation";
 import { setStep } from "../helpers/session";
-import { errorMessage, successMessage, promptWithSkip, promptWithOptions, escapeHtml } from "../helpers/messaging";
+import { errorMessage, successMessage, promptWithOptions, escapeHtml } from "../helpers/messaging";
+import { handleCardStep, showCard, type CardHeader } from "../helpers/card";
 import {
   startCommunityPicker,
   renderCommunityPicker,
   handleCommunityPickerInput,
+  pickedAnswer,
   pickedCommunities
 } from "../helpers/community";
 import { findOsmNodeForOrganization, type OsmResult } from "../helpers/osm";
-import type { ChatId, SendMessage, Session } from "../types";
+import { callTelegram } from "../helpers/telegram";
+import type { ChatId, InlineKeyboardButton, SendMessage, SendOptions, Session } from "../types";
 
-const ORG_STATUS_CODE_TO_ID: Record<string, number> = {
-  "btc-curious": 1,
-  "accepts-bitcoin": 2,
-  "not-interested": 3,
-  "stopped-accepting": 4
+// The statuses as organization_statuses has them; the codes are the buttons' callback_data.
+const ORG_STATUSES: Record<string, { id: number; label: string }> = {
+  "btc-curious": { id: 1, label: "Curious about Bitcoin" },
+  "accepts-bitcoin": { id: 2, label: "Accepts Bitcoin" },
+  "not-interested": { id: 3, label: "Not Interested" },
+  "stopped-accepting": { id: 4, label: "Stopped Accepting Bitcoin" }
 };
-
-const ORG_STATUS_OPTIONS = [
-  { label: "BTC-curious", value: "btc-curious" },
-  { label: "Accepts Bitcoin", value: "accepts-bitcoin" },
-  { label: "Not interested", value: "not-interested" },
-  { label: "Stopped accepting", value: "stopped-accepting" }
-];
 
 const ORG_PICKER_TITLE = "Select Bitcoin communities for this organization:";
 
@@ -36,8 +34,9 @@ const OSM_TYPE_KEYS = "shop amenity office craft industrial tourism leisure heal
   " "
 );
 const OSM_MAX_RESULTS = 8;
-// Room for the OpenStreetMap details within Telegram's 4096-character message limit.
-const OSM_DETAILS_MAX_LENGTH = 3500;
+// Longer place names are cut, so eight of them fit in one message and on buttons.
+const OSM_NAME_MAX_LENGTH = 60;
+const SAVE_FAILED = "Saving failed, nothing was saved. Please try again.";
 
 // Organizations listed after a name search.
 export const ORG_MAX_RESULTS = 5;
@@ -45,10 +44,10 @@ export const ORG_MAX_RESULTS = 5;
 export const INVALID_ORGANIZATION_NAME =
   "Please enter a valid organization name (organization names should be words, not a phone number or symbols).";
 
-export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
-// The command that starts the user's flow again.
-const restartCommand = (session: Session) => (session.mode === "org" ? "/neworg" : "/newcontact");
+// A button under a new contact that starts logging a conversation with them (log:<id>).
+export const logConversationButton = (contactId: number, name: string): SendOptions => ({
+  reply_markup: { inline_keyboard: [[{ text: `💬 Log conversation with ${name}`, callback_data: `log:${contactId}` }]] }
+});
 
 // The contact of a /newcontact session, as newContact takes it. created_by is the team member
 // id (team_members.id) of the user, not the Telegram user id.
@@ -61,6 +60,45 @@ export function contactInput(session: Session) {
     nostr_npub: session.nostr_npub || null,
     created_by: session.created_by || null
   };
+}
+
+const communityNames = (session: Session) => (session.organization_communities ?? []).map(c => c.name).join(", ");
+const statusLabel = (session: Session) => ORG_STATUSES[session.organization_status ?? ""]?.label ?? "";
+
+// What the card says about the contact and organization, above the optional details.
+const cardHeader: CardHeader = session => {
+  if (session.mode === "org") {
+    return [
+      "New organization:",
+      `🏢 ${session.organization}`,
+      `🏷️ ${statusLabel(session)}`,
+      `👥 ${communityNames(session) || "No community"}`
+    ];
+  }
+  const lines = [
+    "New contact:",
+    `👤 ${session.name}`,
+    `🏷️ ${session.type === "entrepreneur" ? "Entrepreneur" : "Consumer"}`
+  ];
+  if (session.organization) {
+    lines.push(
+      `🏢 ${session.organization} (new: ${statusLabel(session)}; ${communityNames(session) || "no community"})`
+    );
+  } else if (session.organization_label) {
+    lines.push(`🏢 ${session.organization_label}`);
+  }
+  return lines;
+};
+
+// Shows the overview card of the contact or organization in the session.
+export async function showRecordCard(
+  sendMessage: SendMessage,
+  env: Env,
+  chatId: ChatId,
+  session: Session,
+  persistSession: () => Promise<void>
+) {
+  await showCard(sendMessage, env, chatId, session, persistSession, cardHeader);
 }
 
 /**
@@ -77,110 +115,106 @@ export async function startOrganizationSteps(
   session.organization = name;
   setStep(session, "awaiting_org_status");
   await persistSession();
-  const prompt = promptWithOptions("What is the Bitcoin adoption status of the organization?", ORG_STATUS_OPTIONS);
+  const options = Object.entries(ORG_STATUSES).map(([value, { label }]) => ({ label, value }));
+  const prompt = promptWithOptions(`What is the Bitcoin status of "${name}"?`, options);
   await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
 }
 
 /**
- * Saves the new organization. For /newcontact the organization, its communities, the contact
- * and their audit entries go in one newContact call, so a failure leaves nothing behind.
+ * Saves what the card describes. The contact and a new organization with its communities go in
+ * one newContact call, so a failure leaves nothing behind. On a failure the session stays, so the
+ * user can try again with the same input.
  */
-async function saveOrganization(
+async function save(
   sendMessage: SendMessage,
   env: Env,
   chatId: ChatId,
   session: Session,
   removeSession: () => Promise<void>,
-  osmId: string | null
+  osmId: string | null,
+  osmNotFound = false
 ) {
-  const status = session.organization_status && ORG_STATUS_CODE_TO_ID[session.organization_status];
-  if (!status) {
-    await sendMessage(
-      env,
-      chatId,
-      errorMessage(`Organization status is missing or invalid. Please start again with ${restartCommand(session)}.`)
-    );
-    await removeSession();
-    return;
-  }
   const communities = session.organization_communities || [];
-  const organization = {
-    name: session.organization ?? "",
-    status,
-    location_osm_id: osmId,
-    website: session.organization_website || null,
-    nostr_npub: session.organization_nostr_npub || null,
-    community_ids: communities.map(c => c.id)
-  };
+  const organization = session.organization
+    ? {
+        name: session.organization,
+        status: ORG_STATUSES[session.organization_status ?? ""]?.id ?? 0,
+        location_osm_id: osmId,
+        website: session.organization_website || null,
+        nostr_npub: session.organization_nostr_npub || null,
+        community_ids: communities.map(c => c.id)
+      }
+    : undefined;
   const details = [
     communities.length > 0 ? `communities: ${communities.map(c => c.name).join(", ")}` : null,
-    osmId ? `OpenStreetMap: ${osmId}` : null
+    osmId ? "📍 location linked" : null
   ].filter(Boolean);
-  const suffix = details.length ? ` (${details.join("; ")})` : "";
-  if (session.mode === "contact") {
-    try {
-      const res = await env.crmApi.newContact({ ...contactInput(session), new_organization: organization });
-      await sendMessage(
-        env,
-        chatId,
-        res.ok
-          ? successMessage(`Organization "${session.organization}" and contact "${session.name}" added.${suffix}`)
-          : errorMessage(`Failed to add organization and contact (code ${res.status}). Nothing was saved.`)
-      );
-    } catch (e) {
-      await sendMessage(
-        env,
-        chatId,
-        errorMessage(`Error adding organization and contact (${errorText(e)}). Nothing was saved.`)
-      );
+  const suffix =
+    (details.length ? ` (${details.join("; ")})` : "") + (osmNotFound ? "\nNo OpenStreetMap location was found." : "");
+  try {
+    if (session.mode === "org") {
+      const res = await env.crmApi.newOrg({ ...organization!, created_by: session.created_by || null });
+      if (!res.ok) throw new Error(res.error);
+      await sendMessage(env, chatId, successMessage(`Organization "${session.organization}" added.${suffix}`));
+    } else {
+      const res = await env.crmApi.newContact({
+        ...contactInput(session),
+        ...(organization ? { new_organization: organization } : { organization_id: session.organization_id ?? null })
+      });
+      if (!res.ok) throw new Error(res.error);
+      const done = organization
+        ? `Organization "${session.organization}" and contact "${session.name}" added.${suffix}`
+        : session.organization_label
+          ? `Contact "${session.name}" added to "${session.organization_label}".`
+          : `Contact "${session.name}" added.`;
+      await sendMessage(env, chatId, successMessage(done), logConversationButton(res.id, session.name ?? ""));
     }
-  } else {
-    try {
-      const res = await env.crmApi.newOrg({ ...organization, created_by: session.created_by || null });
-      await sendMessage(
-        env,
-        chatId,
-        res.ok
-          ? successMessage(`Organization "${session.organization}" added.${suffix}`)
-          : errorMessage(`Failed to add organization (code ${res.status}).`)
-      );
-    } catch (e) {
-      await sendMessage(env, chatId, errorMessage(`Error adding organization: ${errorText(e)}`));
-    }
+  } catch (e) {
+    console.error("Saving a contact or organization failed", e);
+    await sendMessage(env, chatId, errorMessage(SAVE_FAILED));
+    return;
   }
   await removeSession();
 }
 
-function formatOsmItem(item: OsmResult) {
-  const lines = [`<b># ${escapeHtml(item.osm_id)}</b>`, `<b>Name:</b> ${escapeHtml(item.name || "(no name)")}`];
-  if (item.class && item.type) {
-    lines.push(`<b>OSM type:</b> ${escapeHtml(item.class)} = ${escapeHtml(item.type)}`);
-  }
-  if (item.tags) {
-    for (const key of OSM_TYPE_KEYS) {
-      if (item.tags[key]) lines.push(`<b>Tag:</b> ${escapeHtml(key)} = ${escapeHtml(item.tags[key])}`);
-    }
-  }
-  const address = item.address;
-  const addressLine = [
-    address.street,
-    address.housenumber,
-    address.postcode,
-    address.city,
-    address.region,
-    address.country
-  ]
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+const osmName = (item: OsmResult) => clip(item.name || "(no name)", OSM_NAME_MAX_LENGTH);
+
+// "Nieuwestad 1, Leeuwarden"
+const osmPlace = (item: OsmResult) =>
+  [[item.address.street, item.address.housenumber].filter(Boolean).join(" "), item.address.city]
     .filter(Boolean)
     .join(", ");
-  if (addressLine) lines.push(`<b>Address:</b> ${escapeHtml(addressLine)}`);
-  if (item.phone) lines.push(`<b>Phone:</b> ${escapeHtml(item.phone)}`);
-  if (item.email) lines.push(`<b>Email:</b> ${escapeHtml(item.email)}`);
-  if (item.website) lines.push(`<b>Website:</b> ${escapeHtml(item.website)}`);
-  return lines.join("\n");
+
+// What kind of place it is in plain words, e.g. "cafe", or "bicycle shop" for shop=bicycle.
+function osmKind(item: OsmResult) {
+  // Overpass gives the tags; Nominatim also says it as class and type (amenity, cafe).
+  const key = OSM_TYPE_KEYS.find(k => item.tags?.[k]) ?? (OSM_TYPE_KEYS.includes(item.class) ? item.class : undefined);
+  const value = key && (item.tags?.[key] || item.type);
+  if (!key || !value) return "";
+  const words = value.replaceAll("_", " ");
+  return key === "shop" && words !== "yes" ? `${words} shop` : words;
 }
 
-// Searches OpenStreetMap for the organization (per region of the selected communities) and either
-// asks the user to pick a location or saves right away.
+function osmItem(item: OsmResult, number: number) {
+  const about = [osmKind(item), osmPlace(item)].filter(Boolean).join(" · ");
+  return [
+    `<b>${number}. ${escapeHtml(osmName(item))}</b>`,
+    ...(about ? [escapeHtml(about)] : []),
+    `<a href="https://www.openstreetmap.org/${escapeHtml(item.id)}">View on the map</a>`
+  ].join("\n");
+}
+
+const OSM_MORE_BUTTONS: InlineKeyboardButton[][] = [
+  [{ text: "🔍 Search another name", callback_data: "osm:search" }],
+  [{ text: "None of these", callback_data: "osmnode:none" }]
+];
+
+/**
+ * Searches OpenStreetMap for the new organization (per region of its communities) and asks which
+ * place it is. When the first search finds nothing, it saves right away without a location.
+ */
 async function lookupOsmAndContinue(
   sendMessage: SendMessage,
   env: Env,
@@ -190,52 +224,52 @@ async function lookupOsmAndContinue(
   removeSession: () => Promise<void>
 ) {
   const regions = (session.organization_communities || []).map(c => c.region).filter((r): r is string => !!r);
-  await sendMessage(env, chatId, "Searching for OpenStreetMap locations... ⏳");
-  let osmResults: OsmResult[] = [];
+  const name = session.osm_name || session.organization || "";
+  // The search takes a few seconds; Telegram shows "typing…" meanwhile.
+  await callTelegram(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+  let results: OsmResult[] = [];
   try {
     // One lookup for all regions: it deduplicates the results and spaces the Nominatim requests.
-    osmResults = await findOsmNodeForOrganization({
-      name: session.organization ?? "",
+    results = await findOsmNodeForOrganization({
+      name,
       regions,
       phone: session.phone,
       website: session.organization_website,
       email: session.email
     });
   } catch {
-    osmResults = [];
+    results = [];
   }
-  osmResults = osmResults.filter(item => item && item.id).slice(0, OSM_MAX_RESULTS);
-  if (osmResults.length === 0) {
-    await saveOrganization(sendMessage, env, chatId, session, removeSession, null);
+  results = results.filter(item => item && item.id).slice(0, OSM_MAX_RESULTS);
+  if (results.length === 0 && !session.osm_name) {
+    await save(sendMessage, env, chatId, session, removeSession, null, true);
     return;
   }
-  // Whole items only: a cut inside an HTML tag makes Telegram refuse the entire message.
-  const items: string[] = [];
-  let length = 0;
-  for (const item of osmResults) {
-    const formatted = formatOsmItem(item);
-    const added = (items.length > 0 ? 2 : 0) + formatted.length;
-    if (items.length > 0 && length + added > OSM_DETAILS_MAX_LENGTH) break;
-    items.push(formatted);
-    length += added;
-  }
-  const more = items.length < osmResults.length ? `\n\nShowing ${items.length} of ${osmResults.length} locations.` : "";
-  osmResults = osmResults.slice(0, items.length);
-  session.osm_options = osmResults.map(item => String(item.id));
+  session.osm_options = results.map(item => item.id);
   setStep(session, "awaiting_osm_node");
   await persistSession();
-  const details = items.join("\n\n") + more;
-  const keyboard = osmResults.map(item => [{ text: `# ${item.osm_id}`, callback_data: `osmnode:${item.id}` }]);
-  keyboard.push([{ text: "None of the above", callback_data: "osmnode:none" }]);
-  await sendMessage(env, chatId, `Select the correct OpenStreetMap location for this organization:\n\n${details}`, {
-    reply_markup: { inline_keyboard: keyboard },
-    parse_mode: "HTML"
+  if (results.length === 0) {
+    await sendMessage(env, chatId, `Nothing found on OpenStreetMap for "${name}".`, {
+      reply_markup: { inline_keyboard: OSM_MORE_BUTTONS }
+    });
+    return;
+  }
+  const keyboard = results.map((item, i) => {
+    const place = osmPlace(item);
+    const text = clip(`${i + 1}. ${osmName(item)}${place ? ` – ${place}` : ""}`, 64);
+    return [{ text, callback_data: `osmnode:${item.id}` }];
+  });
+  const items = results.map((item, i) => osmItem(item, i + 1)).join("\n\n");
+  await sendMessage(env, chatId, `Which place on OpenStreetMap is "${escapeHtml(name)}"?\n\n${items}`, {
+    reply_markup: { inline_keyboard: [...keyboard, ...OSM_MORE_BUTTONS] },
+    parse_mode: "HTML",
+    link_preview_options: { is_disabled: true }
   });
 }
 
 /**
- * Handles the update when session.step is one of the organization steps; returns false (and
- * does nothing) for any other step.
+ * Handles the update when session.step is one of the shared steps; returns false (and does
+ * nothing) for any other step.
  */
 export async function handleOrganizationStep(
   sendMessage: SendMessage,
@@ -249,69 +283,26 @@ export async function handleOrganizationStep(
   switch (session.step) {
     case "awaiting_org_status": {
       const status = text || session.last_callback_data;
-      if (!status || !ORG_STATUS_CODE_TO_ID[status]) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please select a valid Bitcoin adoption status for the organization.")
-        );
+      if (!status || !ORG_STATUSES[status]) {
+        await sendMessage(env, chatId, errorMessage("Please choose the Bitcoin status from the buttons."));
         return true;
       }
       session.organization_status = status;
-      setStep(session, "awaiting_org_website");
-      await persistSession();
-      const prompt = promptWithSkip("What is the website of the organization? (optional)");
-      await sendMessage(env, chatId, prompt.text, {
-        reply_markup: prompt.reply_markup,
-        accepts_text: prompt.accepts_text
-      });
-      return true;
-    }
-    case "awaiting_org_website": {
-      let website = text && text.trim();
-      if (text === undefined || session.last_callback_data === "skip" || website?.toLowerCase() === "skip") {
-        website = undefined;
-      } else if (website && !isValidWebsite(website)) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please enter a valid website (for example example.com) or tap Skip.")
-        );
-        return true;
-      }
-      session.organization_website = website || null;
-      setStep(session, "awaiting_org_nostr");
-      await persistSession();
-      const prompt = promptWithSkip("What is the nostr npub of the organization? (optional)");
-      await sendMessage(env, chatId, prompt.text, {
-        reply_markup: prompt.reply_markup,
-        accepts_text: prompt.accepts_text
-      });
-      return true;
-    }
-    case "awaiting_org_nostr": {
-      let nostr = text && text.trim();
-      if (text === undefined || session.last_callback_data === "skip" || nostr?.toLowerCase() === "skip") {
-        nostr = undefined;
-      } else if (nostr && !isValidNpub(nostr)) {
-        await sendMessage(env, chatId, errorMessage("Please enter a valid nostr npub (npub1…) or tap Skip."));
-        return true;
-      }
-      session.organization_nostr_npub = nostr || null;
-      session.org_picker = await startCommunityPicker(env, session.telegram_id);
+      // The member's own communities start selected: usually the organization is in one of them.
+      session.org_picker = await startCommunityPicker(env, session.telegram_id, [], { selectOwn: true });
       setStep(session, "awaiting_communities");
       await persistSession();
-      await sendMessage(env, chatId, ...renderCommunityPicker(session.org_picker, ORG_PICKER_TITLE));
+      await sendMessage(
+        env,
+        chatId,
+        ...renderCommunityPicker(session.org_picker, ORG_PICKER_TITLE, { skipLabel: "No community" })
+      );
       return true;
     }
     case "awaiting_communities": {
       const picker = session.org_picker;
       if (!picker) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage(`Session expired. Please start again with ${restartCommand(session)}.`)
-        );
+        await sendMessage(env, chatId, errorMessage("Session expired. Please start again."));
         await removeSession();
         return true;
       }
@@ -320,34 +311,56 @@ export async function handleOrganizationStep(
       const result = await handleCommunityPickerInput(env, picker, cb);
       await persistSession();
       if (result === "updated") {
-        await sendMessage(env, chatId, ...renderCommunityPicker(picker, ORG_PICKER_TITLE));
+        await sendMessage(
+          env,
+          chatId,
+          ...renderCommunityPicker(picker, ORG_PICKER_TITLE, { replace: true, skipLabel: "No community" })
+        );
       } else if (result === "done" || result === "skip") {
+        if (result === "done") session.pressed_answer = pickedAnswer(picker);
         session.organization_communities = result === "skip" ? [] : pickedCommunities(picker);
-        await persistSession();
-        await lookupOsmAndContinue(sendMessage, env, chatId, session, persistSession, removeSession);
+        await showRecordCard(sendMessage, env, chatId, session, persistSession);
       } else if (typeof result === "object") {
         await sendMessage(env, chatId, errorMessage(result.error));
       } else {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please use the buttons to select communities, then press Done or Skip.")
-        );
+        await sendMessage(env, chatId, errorMessage("Please use the buttons to select communities, then press Done."));
       }
       return true;
     }
+    case "awaiting_card":
+    case "awaiting_card_field":
+      return handleCardStep(sendMessage, env, chatId, text, session, persistSession, cardHeader, async () => {
+        // A new organization gets its OpenStreetMap location first; anything else is saved now.
+        if (session.organization) {
+          await lookupOsmAndContinue(sendMessage, env, chatId, session, persistSession, removeSession);
+        } else {
+          await save(sendMessage, env, chatId, session, removeSession, null);
+        }
+      });
     case "awaiting_osm_node": {
       const cb = session.last_callback_data;
-      const choice = cb && cb.startsWith("osmnode:") ? cb.slice("osmnode:".length) : null;
-      if (!choice || (choice !== "none" && !(session.osm_options || []).includes(choice))) {
-        await sendMessage(
-          env,
-          chatId,
-          errorMessage("Please select a valid OpenStreetMap location or 'None of the above'.")
-        );
+      if (cb === "osm:search") {
+        setStep(session, "awaiting_osm_name");
+        await persistSession();
+        await sendMessage(env, chatId, "Which name should I search OpenStreetMap for?");
         return true;
       }
-      await saveOrganization(sendMessage, env, chatId, session, removeSession, choice === "none" ? null : choice);
+      const choice = cb && cb.startsWith("osmnode:") ? cb.slice("osmnode:".length) : null;
+      if (!choice || (choice !== "none" && !(session.osm_options || []).includes(choice))) {
+        await sendMessage(env, chatId, errorMessage("Please choose a place from the buttons, or 'None of these'."));
+        return true;
+      }
+      await save(sendMessage, env, chatId, session, removeSession, choice === "none" ? null : choice);
+      return true;
+    }
+    case "awaiting_osm_name": {
+      const name = text?.trim();
+      if (!name) {
+        await sendMessage(env, chatId, errorMessage("Please type the name to search for."));
+        return true;
+      }
+      session.osm_name = name;
+      await lookupOsmAndContinue(sendMessage, env, chatId, session, persistSession, removeSession);
       return true;
     }
     default:

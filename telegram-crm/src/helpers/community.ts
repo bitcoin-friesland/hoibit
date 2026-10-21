@@ -14,7 +14,7 @@
  *
  * Buttons: community:<id> (toggle), choose_other (country list), country:<index>, back, done, skip.
  */
-import type { PickedCommunity, SendOptions } from "../types";
+import type { InlineKeyboardButton, PickedCommunity, SendOptions } from "../types";
 
 export interface CommunityPicker {
   // ids of the team member's own communities, always shown first
@@ -31,12 +31,14 @@ export type PickerResult = "updated" | "done" | "skip" | "invalid" | { error: st
 /**
  * Creates picker state, preloaded with the team member's own communities.
  * preselected communities (e.g. the current ones of a member being edited) start
- * selected and are shown first, next to the own ones.
+ * selected and are shown first, next to the own ones. With selectOwn the own
+ * communities start selected too, for when they are the likely answer.
  */
 export async function startCommunityPicker(
   env: Env,
   telegramId: string | undefined,
-  preselected: PickedCommunity[] = []
+  preselected: PickedCommunity[] = [],
+  { selectOwn = false } = {}
 ): Promise<CommunityPicker> {
   let own: { id: number; name: string; region: string | null }[] = [];
   try {
@@ -48,7 +50,7 @@ export async function startCommunityPicker(
   return {
     own: shown.map(c => c.id),
     known: Object.fromEntries(shown.map(c => [c.id, { name: c.name, region: c.region || null }])),
-    selected: preselected.map(c => c.id),
+    selected: (selectOwn ? shown : preselected).map(c => c.id),
     countries: null,
     country: null,
     countryIds: null
@@ -65,31 +67,42 @@ function communityButton(state: CommunityPicker, id: number) {
 }
 
 /**
- * Returns [text, { reply_markup }] for the current view, ready for sendMessage(env, chatId, ...).
+ * Returns [text, options] for the current view, ready for sendMessage(env, chatId, ...).
  * title is shown on the main view (own communities + selections from other countries).
+ * replace redraws the picker in place after one of its buttons was pressed. skipLabel names
+ * the "skip" button: what skipping means where the picker is used.
  */
-export function renderCommunityPicker(state: CommunityPicker, title: string): [string, SendOptions] {
+export function renderCommunityPicker(
+  state: CommunityPicker,
+  title: string,
+  { replace = false, skipLabel = "Skip" } = {}
+): [string, SendOptions] {
+  const [text, keyboard] = pickerView(state, title, skipLabel);
+  return [text, { reply_markup: { inline_keyboard: keyboard }, ...(replace ? { replace } : {}) }];
+}
+
+function pickerView(state: CommunityPicker, title: string, skipLabel: string): [string, InlineKeyboardButton[][]] {
   if (state.countryIds) {
     const rows = state.countryIds.map(id => communityButton(state, id));
     rows.push(
       [{ text: "Back to countries", callback_data: "choose_other" }],
       [{ text: "Done", callback_data: "done" }]
     );
-    return [`Select communities in ${state.country}:`, { reply_markup: { inline_keyboard: rows } }];
+    return [`Select communities in ${state.country}:`, rows];
   }
   if (state.countries) {
     const rows = state.countries.map((country, i) => [{ text: country, callback_data: `country:${i}` }]);
     rows.push([{ text: "Back", callback_data: "back" }]);
-    return ["Choose a country:", { reply_markup: { inline_keyboard: rows } }];
+    return ["Choose a country:", rows];
   }
   const ids = [...state.own, ...state.selected.filter(id => !state.own.includes(id))];
   const rows = ids.map(id => communityButton(state, id));
   rows.push(
     [{ text: "Choose other communities", callback_data: "choose_other" }],
     [{ text: "Done", callback_data: "done" }],
-    [{ text: "Skip", callback_data: "skip" }]
+    [{ text: skipLabel, callback_data: "skip" }]
   );
-  return [title, { reply_markup: { inline_keyboard: rows } }];
+  return [title, rows];
 }
 
 /**
@@ -147,4 +160,13 @@ export async function handleCommunityPickerInput(
  */
 export function pickedCommunities(state: CommunityPicker): PickedCommunity[] {
   return state.selected.map(id => ({ id, ...state.known[id] }));
+}
+
+// What the picker's message shows as the answer after Done (see Session.pressed_answer).
+export function pickedAnswer(state: CommunityPicker) {
+  return (
+    pickedCommunities(state)
+      .map(c => c.name)
+      .join(", ") || "No community"
+  );
 }

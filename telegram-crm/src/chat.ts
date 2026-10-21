@@ -40,6 +40,8 @@ export const RECENT_UPDATE_IDS = 50;
 
 // Sessions are per user: in a group every member runs their own flow.
 const sessionKey = (userId: UserId) => `session:${userId}`;
+// Per user too, so in a group every newcomer is told once how to join.
+const unauthorizedKey = (userId: UserId) => `unauthorized_notified_until:${userId}`;
 
 export function storeFor(kv: SyncKvStorage, now: () => number = Date.now): SessionStore {
   return {
@@ -59,12 +61,12 @@ export function storeFor(kv: SyncKvStorage, now: () => number = Date.now): Sessi
       kv.put("recent_update_ids", [...recent, updateId].slice(-RECENT_UPDATE_IDS));
       return true;
     },
-    wasUnauthorizedNotified() {
-      const until = kv.get<number>("unauthorized_notified_until");
+    wasUnauthorizedNotified(userId) {
+      const until = kv.get<number>(unauthorizedKey(userId));
       return until !== undefined && until > now();
     },
-    markUnauthorizedNotified() {
-      kv.put("unauthorized_notified_until", now() + UNAUTHORIZED_NOTICE_TTL_MS);
+    markUnauthorizedNotified(userId) {
+      kv.put(unauthorizedKey(userId), now() + UNAUTHORIZED_NOTICE_TTL_MS);
     }
   };
 }

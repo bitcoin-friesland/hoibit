@@ -1,11 +1,14 @@
 // Letters in any script ("José", "Gerbrân"), spaces, straight and curly apostrophes (iOS types
-// "D’Angelo"), hyphens and dots ("Dr. Anna Smit"); at least 3 letters. Digits and "@" are refused,
-// so a phone number or email address is not taken for a name.
+// "D’Angelo"), hyphens and dots ("Dr. Anna Smit"); at least 2 letters ("Bo"). Digits and "@" are
+// refused, so a phone number or email address is not taken for a name.
 export function isValidName(name: string | undefined): name is string {
   if (typeof name !== "string") return false;
   const trimmed = name.trim();
-  return /^[\p{L}\p{M}\s'’.-]+$/u.test(trimmed) && (trimmed.match(/\p{L}/gu) ?? []).length >= 3;
+  return /^[\p{L}\p{M}\s'’.-]+$/u.test(trimmed) && (trimmed.match(/\p{L}/gu) ?? []).length >= 2;
 }
+
+// What isValidName asks for, to tell the user.
+export const NAME_RULE = "Please enter a name of at least 2 letters, without digits or @.";
 
 // Any name with at least one letter, in any script, with common punctuation ("’t Hoekje",
 // "Café (Leeuwarden)"). The letter keeps out phone numbers, "@" keeps out email addresses.
@@ -17,15 +20,27 @@ export function isValidEmail(email: string | undefined): email is string {
   return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
 
-export function isValidPhone(phone: string | undefined): phone is string {
-  if (typeof phone !== "string") return false;
-  const trimmed = phone.trim();
-  // Must start with + or 00, and only contain allowed characters
-  return /^(?:\+|00)/.test(trimmed) && /^[\d\s()+-]+$/.test(trimmed);
-}
+// A phone number without spaces, dashes, dots, slashes and brackets. "(0)" goes first: in
+// "+31 (0)6 …" it is the national prefix, which an international number leaves out.
+const compactPhone = (phone: string) =>
+  phone
+    .trim()
+    .replaceAll("(0)", "")
+    .replace(/[\s\-./()]/g, "");
 
-export function isValidTelegramId(id: string | undefined): id is string {
-  return typeof id === "string" && /^\d+$/.test(id.trim());
+// Whether phone is written nationally ("06 12345678"), so it needs a country code.
+export const isNationalPhone = (phone: string) => /^0[1-9]/.test(compactPhone(phone));
+
+/**
+ * The phone number in international (E.164) form, e.g. "+31612345678", as the CRM stores it and
+ * OpenStreetMap is searched with; undefined when it is no phone number. "00" counts as "+", and
+ * a national number gets countryCode ("31" for "06 12345678").
+ */
+export function toInternationalPhone(phone: string, countryCode: string): string | undefined {
+  let number = compactPhone(phone);
+  if (number.startsWith("00")) number = `+${number.slice(2)}`;
+  else if (/^0[1-9]/.test(number)) number = `+${countryCode}${number.slice(1)}`;
+  return /^\+[1-9]\d{6,14}$/.test(number) ? number : undefined;
 }
 
 export function isValidNote(note: string | undefined): note is string {

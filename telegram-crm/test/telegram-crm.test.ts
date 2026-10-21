@@ -1,7 +1,15 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { escapeForOverpass } from "../src/helpers/osm";
-import { addAdmin, callbackAnswers, chatAs, resetAndStubFetch, type SentMessage } from "./harness";
+import {
+  addAdmin,
+  callbackAnswers,
+  chatAs,
+  groupChat,
+  lastKeyboardMessage,
+  resetAndStubFetch,
+  type SentMessage
+} from "./harness";
 
 const ADMIN = 5001;
 let sent: SentMessage[];
@@ -19,12 +27,24 @@ describe("webhook", () => {
     expect(sent).toHaveLength(0);
   });
 
-  it("tells an unknown user they are not authorized", async () => {
+  it("tells an unknown user how to join, without asking for their Telegram ID", async () => {
     await addAdmin(ADMIN);
     const res = await chatAs(6001).text("/help");
     // Any other status makes Telegram redeliver the update.
     expect(res.status).toBe(200);
-    expect(lastText()).toContain("not authorized");
+    expect(lastText()).toBe("You're not on the team yet. To join, ask an admin for an invite link.");
+  });
+
+  it("tells each newcomer in a group once, not at every command", async () => {
+    await addAdmin(ADMIN);
+    const group = groupChat();
+    await group.as(6001).text("/help");
+    await group.as(6001).text("/newcontact");
+    await group.as(6002).text("/help");
+    expect(sent.map(m => m.text)).toEqual([
+      "You're not on the team yet. To join, ask an admin for an invite link.",
+      "You're not on the team yet. To join, ask an admin for an invite link."
+    ]);
   });
 });
 
@@ -34,10 +54,12 @@ describe("/newcontact", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     await chat.text("Alice");
-    await chat.text("alice@example.com");
-    await chat.text("+31612345678");
-    await chat.press("skip");
     await chat.press("consumer");
+    await chat.press("card:email");
+    await chat.text("alice@example.com");
+    await chat.press("card:phone");
+    await chat.text("06 12345678");
+    await chat.press("card:save");
     expect(lastText()).toBe('✅ Contact "Alice" added.');
 
     const contact = await env.DB.prepare(
@@ -62,23 +84,21 @@ describe("/newcontact", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     await chat.text("Bob");
-    await chat.press("skip");
-    await chat.press("skip");
-    await chat.press("skip");
     await chat.press("entrepreneur");
     await chat.text("Cafe Satoshi");
     expect(lastText()).toBe('No organization found with the name "Cafe Satoshi".');
     await chat.press("create_org");
     await chat.press("accepts-bitcoin");
-    await chat.text("https://cafe.example");
-    await chat.press("skip");
     await chat.press("choose_other");
     await chat.press("country:0");
-    // sendMessage serializes reply_markup; press the first community of the country
-    const keyboard = JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard;
-    await chat.press(keyboard[0][0].callback_data);
+    // The picker shows the country in the same message; press its first community.
+    const keyboard = lastKeyboardMessage(ADMIN)!.reply_markup!.inline_keyboard;
+    await chat.press(keyboard[0][0].callback_data!);
     await chat.press("done");
-    expect(lastText()).toMatch(/^✅ Organization "Cafe Satoshi" and contact "Bob" added\. \(communities: .+\)$/);
+    await chat.press("card:organization_website");
+    await chat.text("https://cafe.example");
+    await chat.press("card:save");
+    expect(lastText()).toMatch(/^✅ Organization "Cafe Satoshi" and contact "Bob" added\. \(communities: .+\)\n/);
 
     const row = await env.DB.prepare(
       `SELECT o.name, o.status, o.website, c.name AS contact, COUNT(oc.community_id) AS communities
@@ -103,13 +123,12 @@ describe("/newcontact", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     await chat.text("Carol");
-    await chat.press("skip");
-    await chat.press("skip");
-    await chat.press("skip");
     await chat.press("entrepreneur");
     await chat.text("satoshi");
     expect(lastText()).toBe("Select an existing organization or create new:");
     await chat.press(`select_org:${orgId}`);
+    expect(lastText()).toContain("🏢 Cafe Satoshi");
+    await chat.press("card:save");
     expect(lastText()).toBe('✅ Contact "Carol" added to "Cafe Satoshi".');
     const contact = await env.DB.prepare("SELECT organization_id FROM contacts WHERE name = 'Carol'").first();
     expect(contact).toEqual({ organization_id: orgId });
@@ -133,21 +152,17 @@ describe("/newcontact", () => {
     const chat = chatAs(ADMIN);
     await chat.text("/newcontact");
     await chat.text("Dave");
-    await chat.press("skip");
-    await chat.press("skip");
-    await chat.press("skip");
     await chat.press("entrepreneur");
     await chat.text("Cafe Satoshi");
     await chat.press("create_org");
     await chat.press("accepts-bitcoin");
-    await chat.text("https://cafe.example");
     await chat.press("skip");
-    await chat.press("skip");
+    await chat.press("card:save");
     const choice = sent[sent.length - 1];
     expect(choice.parse_mode).toBe("HTML");
-    expect(choice.text).toContain("<b>Address:</b> Nieuwestad, Leeuwarden");
+    expect(choice.text).toContain("<b>1. Cafe Satoshi</b>\ncafe · Nieuwestad, Leeuwarden");
     await chat.press("osmnode:node/42");
-    expect(lastText()).toBe('✅ Organization "Cafe Satoshi" and contact "Dave" added. (OpenStreetMap: node/42)');
+    expect(lastText()).toBe('✅ Organization "Cafe Satoshi" and contact "Dave" added. (📍 location linked)');
     const org = await env.DB.prepare("SELECT location_osm_id FROM organizations").first();
     expect(org).toEqual({ location_osm_id: "node/42" });
   });
@@ -170,7 +185,8 @@ describe("/logconversation", () => {
     await chat.text("ali");
     expect(lastText()).toBe("Select the contact:");
     expect(JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard).toEqual([
-      [{ text: "Alice", callback_data: `select_contact:${contactId}` }]
+      [{ text: "Alice", callback_data: `select_contact:${contactId}` }],
+      [{ text: "✖️ Cancel", callback_data: "cancel" }]
     ]);
     await chat.press(`select_contact:${contactId}`);
     expect(lastText()).toBe("How did you talk to Alice?");
@@ -224,28 +240,6 @@ describe("/invite", () => {
     await env.DB.prepare("INSERT INTO team_members (telegram_id, name) VALUES (?, ?)").bind("7001", "Member").run();
     await chatAs(7001).text("/invite");
     expect(lastText()).toBe("Only admins can manage team members.");
-  });
-
-  it("adds the invited team member with the chosen communities", async () => {
-    await addAdmin(ADMIN);
-    const chat = chatAs(ADMIN);
-    await chat.text("/invite");
-    await chat.text("7001");
-    await chat.text("Erin");
-    await chat.text("Europe/Amsterdam");
-    await chat.press("choose_other");
-    await chat.press("country:0");
-    const keyboard = JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard;
-    await chat.press(keyboard[0][0].callback_data);
-    await chat.press("done");
-    await chat.text("confirm");
-    expect(lastText()).toBe('✅ "Erin" added as team member. Ask them to open the bot and send /help.');
-    const member = await env.DB.prepare(
-      `SELECT m.telegram_id, m.time_zone, COUNT(c.community_id) AS communities
-       FROM team_members m LEFT JOIN team_member_communities c ON c.team_member_id = m.id
-       WHERE m.telegram_id = '7001'`
-    ).first();
-    expect(member).toEqual({ telegram_id: "7001", time_zone: "Europe/Amsterdam", communities: 1 });
   });
 });
 

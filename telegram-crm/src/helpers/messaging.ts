@@ -4,18 +4,11 @@ export function errorMessage(text: string) {
   return `❌ ${text}`;
 }
 
+// Whether text was made by errorMessage: the input was refused, the question still stands.
+export const isErrorMessage = (text: string) => text.startsWith("❌ ");
+
 export function successMessage(text: string) {
   return `✅ ${text}`;
-}
-
-export function promptWithSkip(
-  text: string
-): { text: string } & Required<Pick<SendOptions, "reply_markup" | "accepts_text">> {
-  return {
-    text,
-    reply_markup: { inline_keyboard: [[{ text: "Skip", callback_data: "skip" }]] },
-    accepts_text: true
-  };
 }
 
 export function promptWithOptions(

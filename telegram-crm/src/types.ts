@@ -5,16 +5,19 @@ export type { Community };
 
 export type ChatId = number | string;
 
-export interface InlineKeyboardButton {
-  text: string;
-  callback_data: string;
-}
+// A button that sends callback_data to the bot, or one that opens url.
+export type InlineKeyboardButton = { text: string; callback_data: string } | { text: string; url: string };
 
 export interface SendOptions {
   reply_markup?: { inline_keyboard: InlineKeyboardButton[][] };
   parse_mode?: "HTML";
   // The step also takes a typed answer besides the buttons; in a group the bot then says how.
   accepts_text?: boolean;
+  // For messages with links that need no preview, such as the OpenStreetMap places.
+  link_preview_options?: { is_disabled: true };
+  // After a button press: replace the message with the pressed button instead of sending a new
+  // one, for a keyboard that changes in place such as the community picker.
+  replace?: boolean;
 }
 
 export type SendMessage = (env: Env, chatId: ChatId, text: string, options?: SendOptions) => Promise<void>;
@@ -30,7 +33,7 @@ export type UserId = number | string;
  * has their own flow. Each flow uses its own subset of the optional fields.
  */
 export interface Session {
-  mode?: "contact" | "org" | "conversation" | "first_user" | "teammember";
+  mode?: "contact" | "org" | "conversation" | "teammember";
   step?: string;
   // Telegram user id of the user running the flow
   telegram_id?: string;
@@ -40,6 +43,9 @@ export interface Session {
   last_callback_data?: string | null;
   // message_id of the last message with buttons sent in this flow; only its buttons count.
   keyboard_message_id?: number;
+  // How the pressed message records the answer, when the button's text does not say it (the
+  // communities chosen with "Done"); set by the flow, used and cleared after its step.
+  pressed_answer?: string;
 
   // contact flow
   name?: string;
@@ -47,7 +53,14 @@ export interface Session {
   phone?: string | null;
   nostr_npub?: string | null;
   type?: "consumer" | "entrepreneur";
+  // A phone number from a Telegram contact the user shared instead of typing the name
+  shared_phone?: string;
   pending_org?: string;
+  // the existing organization the contact belongs to
+  organization_id?: number;
+  organization_label?: string;
+  // the overview card: the detail being entered (see helpers/card.ts)
+  card_field?: string;
   org_choices?: Record<string, string>;
   organization?: string;
   organization_status?: string;
@@ -56,9 +69,8 @@ export interface Session {
   org_picker?: CommunityPicker;
   organization_communities?: PickedCommunity[];
   osm_options?: string[];
-
-  // first user flow
-  time_zone?: string;
+  // the name OpenStreetMap is searched for, when the user chose another than the organization's
+  osm_name?: string;
 
   // conversation flow
   contact_choices?: Record<string, string>;
@@ -68,11 +80,7 @@ export interface Session {
   channel?: string;
 
   // team member flow
-  invite_id?: string;
-  invite_name?: string;
-  invite_timezone?: string;
   invite_picker?: CommunityPicker;
-  invite_communities?: PickedCommunity[];
   admin_action?: "grant" | "revoke";
   // team_members.id -> label (name, or Telegram ID when the member has no name)
   admin_candidates?: Record<string, string | null>;
@@ -105,6 +113,15 @@ export type FlowHandler = (
   removeSession?: () => Promise<void>
 ) => Promise<void>;
 
+// The sender of an update, as Telegram describes them.
+export interface TelegramUser {
+  id: number;
+  first_name?: string;
+  last_name?: string;
+  // Without "@"; absent when the user has none.
+  username?: string;
+}
+
 // The parts of a Telegram Update this bot reads.
 export interface TelegramUpdate {
   // Unique per bot; Telegram sends the same id again when it redelivers an update.
@@ -112,15 +129,23 @@ export interface TelegramUpdate {
   message?: {
     message_id?: number;
     chat?: { id: number; type: string };
-    from?: { id: number };
+    from?: TelegramUser;
     text?: string;
+    // A contact the user shared from their Telegram contacts.
+    contact?: { phone_number: string; first_name: string; last_name?: string };
   };
   callback_query?: {
     id: string;
     data?: string;
-    from: { id: number };
+    from: TelegramUser;
     // The message the pressed button belongs to.
-    message: { message_id?: number; chat: { id: number } };
+    message: {
+      message_id?: number;
+      chat: { id: number };
+      text?: string;
+      entities?: unknown[];
+      reply_markup?: { inline_keyboard: InlineKeyboardButton[][] };
+    };
   };
 }
 
@@ -132,15 +157,15 @@ export interface UpdateResult {
 
 /**
  * State of one chat, kept in the chat's Durable Object: per user the session of
- * the flow in progress, whether the "not authorized" message was sent recently
- * (per chat), and the ids of recently handled updates.
+ * the flow in progress and whether they recently got the "not on the team"
+ * message, and the ids of recently handled updates.
  */
 export interface SessionStore {
   getSession(userId: UserId): Session | undefined;
   putSession(userId: UserId, session: Session): void;
   deleteSession(userId: UserId): void;
-  wasUnauthorizedNotified(): boolean;
-  markUnauthorizedNotified(): void;
+  wasUnauthorizedNotified(userId: UserId): boolean;
+  markUnauthorizedNotified(userId: UserId): void;
   // Records updateId; false when it was already recorded (a redelivery).
   markUpdateSeen(updateId: number): boolean;
 }

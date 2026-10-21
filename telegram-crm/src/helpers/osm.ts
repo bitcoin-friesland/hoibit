@@ -47,6 +47,8 @@ interface NominatimItem {
   class?: string;
   type?: string;
   display_name?: string;
+  // The place's own name; display_name adds the whole address to it.
+  namedetails?: { name?: string };
   address?: Record<string, string>;
   extratags?: Record<string, string>;
   lat?: string;
@@ -134,7 +136,7 @@ async function searchNominatimByNameAndRegion(name: string, region?: string | nu
     osm_id: item.osm_id,
     class: item.class || "",
     type: item.type || "",
-    name: item.display_name || "",
+    name: item.namedetails?.name || item.display_name?.split(",")[0] || "",
     address: {
       street: item.address?.road || "",
       housenumber: item.address?.house_number || "",

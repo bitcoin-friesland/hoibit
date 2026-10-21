@@ -1,11 +1,42 @@
 import { isValidNote } from "../helpers/validation";
 import { setStep } from "../helpers/session";
 import { errorMessage, successMessage } from "../helpers/messaging";
-import type { FlowHandler } from "../types";
+import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
 
 const CONTACT_MAX_RESULTS = 8;
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+// How a contact is named in this flow: with their organization, which tells equal names apart.
+const contactLabel = (c: { name: string; organization_name: string | null }) =>
+  c.organization_name ? `${c.name} (${c.organization_name})` : c.name;
+
+// The contact is chosen: asks how the conversation went (awaiting_channel).
+async function askChannel(
+  sendMessage: SendMessage,
+  env: Env,
+  chatId: ChatId,
+  session: Session,
+  persistSession: () => Promise<void>,
+  contactId: number,
+  label: string
+) {
+  let channels;
+  try {
+    channels = await env.crmApi.channels();
+  } catch (e) {
+    await sendMessage(env, chatId, errorMessage(`Error loading channels: ${errorText(e)}`));
+    return;
+  }
+  session.contact_id = contactId;
+  session.contact_label = label;
+  session.channel_choices = Object.fromEntries(channels.map(c => [c.id, c.label]));
+  setStep(session, "awaiting_channel");
+  await persistSession();
+  await sendMessage(env, chatId, `How did you talk to ${label}?`, {
+    reply_markup: { inline_keyboard: channels.map(c => [{ text: c.label, callback_data: `channel:${c.id}` }]) }
+  });
+}
 
 // Steps: search and pick a contact, pick a channel, write the note, save.
 export const handleConversationFlow: FlowHandler = async (
@@ -18,6 +49,24 @@ export const handleConversationFlow: FlowHandler = async (
   removeSession = async () => {}
 ) => {
   switch (session.step) {
+    case "log_contact": {
+      // Started from a "Log conversation with …" button, so the contact is known.
+      let contact;
+      try {
+        contact = await env.crmApi.getContact(session.contact_id ?? 0);
+      } catch (e) {
+        await sendMessage(env, chatId, errorMessage(`Error loading the contact: ${errorText(e)}`));
+        await removeSession();
+        return;
+      }
+      if (!contact) {
+        await sendMessage(env, chatId, errorMessage("This contact no longer exists."));
+        await removeSession();
+        return;
+      }
+      await askChannel(sendMessage, env, chatId, session, persistSession, contact.id, contactLabel(contact));
+      break;
+    }
     case "awaiting_contact": {
       // last_callback_data stays set until the next step, so only read it for a button press.
       const cb = text === undefined ? session.last_callback_data : null;
@@ -28,21 +77,7 @@ export const handleConversationFlow: FlowHandler = async (
           await sendMessage(env, chatId, errorMessage("Please choose a contact from the buttons, or type a name."));
           return;
         }
-        let channels;
-        try {
-          channels = await env.crmApi.channels();
-        } catch (e) {
-          await sendMessage(env, chatId, errorMessage(`Error loading channels: ${errorText(e)}`));
-          return;
-        }
-        session.contact_id = Number(contactId);
-        session.contact_label = label;
-        session.channel_choices = Object.fromEntries(channels.map(c => [c.id, c.label]));
-        setStep(session, "awaiting_channel");
-        await persistSession();
-        await sendMessage(env, chatId, `How did you talk to ${label}?`, {
-          reply_markup: { inline_keyboard: channels.map(c => [{ text: c.label, callback_data: `channel:${c.id}` }]) }
-        });
+        await askChannel(sendMessage, env, chatId, session, persistSession, Number(contactId), label);
         return;
       }
       const name = text && text.trim();
@@ -62,9 +97,7 @@ export const handleConversationFlow: FlowHandler = async (
         }
         const shown = contacts.slice(0, CONTACT_MAX_RESULTS);
         // Labels stay in the session; buttons carry only ids (callback_data is limited to 64 bytes).
-        const choices = Object.fromEntries(
-          shown.map(c => [String(c.id), c.organization_name ? `${c.name} (${c.organization_name})` : c.name])
-        );
+        const choices = Object.fromEntries(shown.map(c => [String(c.id), contactLabel(c)]));
         session.contact_choices = choices;
         await persistSession();
         const more =
