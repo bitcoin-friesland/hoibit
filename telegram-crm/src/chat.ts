@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { createSerialQueue } from "./helpers/queue";
 import { processUpdate } from "./update";
-import type { Session, SessionStore, TelegramUpdate, UpdateResult } from "./types";
+import type { Session, SessionStore, TelegramUpdate, UpdateResult, UserId } from "./types";
 
 // A flow can be resumed within a working day; after that it is forgotten.
 export const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -10,9 +10,11 @@ export const UNAUTHORIZED_NOTICE_TTL_MS = 24 * 60 * 60 * 1000;
 export const CLEANUP_AFTER_MS = 24 * 60 * 60 * 1000;
 
 /**
- * One Durable Object per Telegram chat (named by chat id). It keeps the chat's
- * session and handles the chat's updates strictly one at a time, so quick button
- * presses never overwrite each other's changes. Different chats run in parallel.
+ * One Durable Object per Telegram chat (named by chat id). It keeps the sessions
+ * of the chat's users and handles the chat's updates strictly one at a time, so
+ * quick button presses never overwrite each other's changes. Different chats run
+ * in parallel. processUpdate never throws, so a failing update does not make
+ * Telegram redeliver it.
  */
 export class ChatSession extends DurableObject<Env> {
   private readonly serial = createSerialQueue();
@@ -33,17 +35,29 @@ export class ChatSession extends DurableObject<Env> {
   }
 }
 
+// How many recent update ids a chat remembers to skip redeliveries.
+export const RECENT_UPDATE_IDS = 50;
+
+// Sessions are per user: in a group every member runs their own flow.
+const sessionKey = (userId: UserId) => `session:${userId}`;
+
 export function storeFor(kv: SyncKvStorage, now: () => number = Date.now): SessionStore {
   return {
-    getSession() {
-      const stored = kv.get<{ session: Session; expiresAt: number }>("session");
+    getSession(userId) {
+      const stored = kv.get<{ session: Session; expiresAt: number }>(sessionKey(userId));
       return stored && stored.expiresAt > now() ? stored.session : undefined;
     },
-    putSession(session) {
-      kv.put("session", { session, expiresAt: now() + SESSION_TTL_MS });
+    putSession(userId, session) {
+      kv.put(sessionKey(userId), { session, expiresAt: now() + SESSION_TTL_MS });
     },
-    deleteSession() {
-      kv.delete("session");
+    deleteSession(userId) {
+      kv.delete(sessionKey(userId));
+    },
+    markUpdateSeen(updateId) {
+      const recent = kv.get<number[]>("recent_update_ids") ?? [];
+      if (recent.includes(updateId)) return false;
+      kv.put("recent_update_ids", [...recent, updateId].slice(-RECENT_UPDATE_IDS));
+      return true;
     },
     wasUnauthorizedNotified() {
       const until = kv.get<number>("unauthorized_notified_until");

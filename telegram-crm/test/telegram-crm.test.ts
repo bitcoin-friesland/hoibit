@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { escapeForOverpass } from "../src/helpers/osm";
-import { addAdmin, chatAs, resetAndStubFetch, type SentMessage } from "./harness";
+import { addAdmin, callbackAnswers, chatAs, resetAndStubFetch, type SentMessage } from "./harness";
 
 const ADMIN = 5001;
 let sent: SentMessage[];
@@ -22,7 +22,8 @@ describe("webhook", () => {
   it("tells an unknown user they are not authorized", async () => {
     await addAdmin(ADMIN);
     const res = await chatAs(6001).text("/help");
-    expect(res.status).toBe(403);
+    // Any other status makes Telegram redeliver the update.
+    expect(res.status).toBe(200);
     expect(lastText()).toContain("not authorized");
   });
 });
@@ -201,9 +202,14 @@ describe("/logconversation", () => {
     expect(lastText()).toBe(
       'No contact found with the name "zed". Type another name, or add the contact first with /newcontact.'
     );
+    // No list was shown, so a contact button can only be an old one.
+    const before = sent.length;
     await chat.press(`select_contact:${contactId}`);
-    expect(lastText()).toBe("❌ Please choose a contact from the buttons, or type a name.");
+    expect(sent).toHaveLength(before);
+    expect(callbackAnswers().at(-1)).toMatchObject({ text: "This button is no longer active." });
     await chat.text("alice");
+    await chat.press("select_contact:999999");
+    expect(lastText()).toBe("❌ Please choose a contact from the buttons, or type a name.");
     await chat.press(`select_contact:${contactId}`);
     await chat.press("channel:pigeon");
     expect(lastText()).toBe("❌ Please choose a channel from the buttons.");

@@ -43,7 +43,8 @@ export const handleFirstUserFlow: FlowHandler = async (
       session.time_zone = timeZone;
       try {
         const res = await env.crmApi.firstUser({
-          telegram_id: String(chatId),
+          // The user's own id: in a group, chatId is the (negative) group id.
+          telegram_id: session.telegram_id ?? "",
           name: session.name ?? "",
           time_zone: session.time_zone
         });

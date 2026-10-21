@@ -1,6 +1,6 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { CLEANUP_AFTER_MS, SESSION_TTL_MS, UNAUTHORIZED_NOTICE_TTL_MS, storeFor } from "../src/chat";
+import { CLEANUP_AFTER_MS, RECENT_UPDATE_IDS, SESSION_TTL_MS, UNAUTHORIZED_NOTICE_TTL_MS, storeFor } from "../src/chat";
 import { createSerialQueue } from "../src/helpers/queue";
 import worker from "../src/index";
 import { addAdmin, chatAs, memoryKv, resetAndStubFetch, SECRET, sessionOf, type SentMessage } from "./harness";
@@ -17,16 +17,35 @@ describe("storeFor", () => {
     const start = 1_000_000;
     let now = start;
     const store = storeFor(memoryKv(), () => now);
-    store.putSession({ mode: "contact", step: "awaiting_name" });
+    store.putSession(ADMIN, { mode: "contact", step: "awaiting_name" });
     store.markUnauthorizedNotified();
     now = start + SESSION_TTL_MS - 1;
-    expect(store.getSession()).toEqual({ mode: "contact", step: "awaiting_name" });
+    expect(store.getSession(ADMIN)).toEqual({ mode: "contact", step: "awaiting_name" });
     now = start + SESSION_TTL_MS;
-    expect(store.getSession()).toBeUndefined();
+    expect(store.getSession(ADMIN)).toBeUndefined();
     now = start + UNAUTHORIZED_NOTICE_TTL_MS - 1;
     expect(store.wasUnauthorizedNotified()).toBe(true);
     now = start + UNAUTHORIZED_NOTICE_TTL_MS;
     expect(store.wasUnauthorizedNotified()).toBe(false);
+  });
+
+  it("keeps one session per user", () => {
+    const store = storeFor(memoryKv());
+    store.putSession(ADMIN, { mode: "contact" });
+    store.putSession("5002", { mode: "org" });
+    expect(store.getSession(String(ADMIN))).toEqual({ mode: "contact" });
+    store.deleteSession(5002);
+    expect(store.getSession(5002)).toBeUndefined();
+    expect(store.getSession(ADMIN)).toEqual({ mode: "contact" });
+  });
+
+  it("recognises the last RECENT_UPDATE_IDS update ids", () => {
+    const store = storeFor(memoryKv());
+    for (let id = 1; id <= RECENT_UPDATE_IDS + 1; id++) expect(store.markUpdateSeen(id)).toBe(true);
+    expect(store.markUpdateSeen(RECENT_UPDATE_IDS + 1)).toBe(false);
+    expect(store.markUpdateSeen(2)).toBe(false);
+    // The oldest id was dropped to keep the list short.
+    expect(store.markUpdateSeen(1)).toBe(true);
   });
 
   it("is wiped no earlier than its data expires", () => {
@@ -77,11 +96,11 @@ describe("ChatSession", () => {
     await runInDurableObject(stub, async (_instance, state) => {
       const alarm = await state.storage.getAlarm();
       expect(alarm).toBeGreaterThan(Date.now() + CLEANUP_AFTER_MS - 60_000);
-      storeFor(state.storage.kv).putSession({ mode: "contact" });
+      storeFor(state.storage.kv).putSession(777, { mode: "contact" });
     });
     expect(await runDurableObjectAlarm(stub)).toBe(true);
     await runInDurableObject(stub, async (_instance, state) => {
-      expect(storeFor(state.storage.kv).getSession()).toBeUndefined();
+      expect(storeFor(state.storage.kv).getSession(777)).toBeUndefined();
       expect(await state.storage.getAlarm()).toBeNull();
     });
   });
