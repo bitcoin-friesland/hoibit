@@ -1,7 +1,11 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { vi } from "vitest";
 import CrmApi from "../../crm-api/src/index";
+import { storeFor } from "../src/chat";
+import { createSerialQueue } from "../src/helpers/queue";
 import worker from "../src/index";
+import { chatIdOf, processUpdate } from "../src/update";
+import type { SessionStore, TelegramUpdate } from "../src/types";
 
 export const SECRET = "test-webhook-secret";
 
@@ -9,7 +13,6 @@ export const SECRET = "test-webhook-secret";
 // crmApi binding; crm-api's own tests cover the real RPC stub.
 const crmApi = new CrmApi(createExecutionContext(), { DB: env.DB });
 const workerEnv = {
-  SESSIONS: env.SESSIONS,
   TELEGRAM_TOKEN: "test-token",
   TELEGRAM_WEBHOOK_SECRET: SECRET,
   crmApi: crmApi as unknown as Env["crmApi"]
@@ -34,12 +37,26 @@ export interface SentMessage {
   parse_mode?: string;
 }
 
+// SyncKvStorage backed by a Map, standing in for a ChatSession's ctx.storage.kv.
+// Values are copied like real storage does, so two readers never share one object.
+export function memoryKv(): SyncKvStorage {
+  const map = new Map<string, unknown>();
+  return {
+    get: <T>(key: string) => structuredClone(map.get(key)) as T | undefined,
+    put: (key, value) => void map.set(key, structuredClone(value)),
+    delete: key => map.delete(key),
+    list: <T>() => map.entries() as Iterable<[string, T]>
+  };
+}
+
+// Per chat: its session store and its update queue, as the chat's Durable Object would have.
+let chats = new Map<number, { store: SessionStore; serial: ReturnType<typeof createSerialQueue> }>();
+
 // Clears CRM data and sessions, and stubs outgoing fetch: Telegram messages are recorded in
 // the returned array, OpenStreetMap returns the given Nominatim results and nothing from Overpass.
 export async function resetAndStubFetch({ nominatim = [] as object[] } = {}): Promise<SentMessage[]> {
   await env.DB.batch(DATA_TABLES.map(table => env.DB.prepare(`DELETE FROM ${table}`)));
-  const keys = await env.SESSIONS.list();
-  await Promise.all(keys.keys.map(key => env.SESSIONS.delete(key.name)));
+  chats = new Map();
 
   const sent: SentMessage[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -65,7 +82,19 @@ function deliver(update: object, secret: string | null = SECRET) {
     headers,
     body: JSON.stringify({ update_id: ++updateId, ...update })
   });
-  return worker.fetch(request, workerEnv as Env);
+  if (secret !== SECRET) return worker.fetch(request, workerEnv as Env);
+  // Valid updates go where index.ts sends them: processUpdate in the chat's (here in-memory) Durable Object.
+  return request.json<TelegramUpdate>().then(async parsed => {
+    const chatId = Number(chatIdOf(parsed));
+    if (!chats.has(chatId)) chats.set(chatId, { store: storeFor(memoryKv()), serial: createSerialQueue() });
+    const chat = chats.get(chatId)!;
+    const { status, body } = await chat.serial(() => processUpdate(workerEnv as Env, chat.store, parsed));
+    return new Response(body, { status });
+  });
+}
+
+export function sessionOf(chatId: number) {
+  return chats.get(chatId)?.store.getSession();
 }
 
 // A private chat with one Telegram user; chat id equals user id, as in Telegram.
