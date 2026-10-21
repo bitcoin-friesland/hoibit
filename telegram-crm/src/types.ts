@@ -13,6 +13,8 @@ export interface InlineKeyboardButton {
 export interface SendOptions {
   reply_markup?: { inline_keyboard: InlineKeyboardButton[][] };
   parse_mode?: "HTML";
+  // The step also takes a typed answer besides the buttons; in a group the bot then says how.
+  accepts_text?: boolean;
 }
 
 export type SendMessage = (env: Env, chatId: ChatId, text: string, options?: SendOptions) => Promise<void>;

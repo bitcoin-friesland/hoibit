@@ -35,6 +35,7 @@ export interface SentMessage {
   chat_id: number;
   text: string;
   reply_markup?: string;
+  reply_parameters?: { message_id: number; allow_sending_without_reply: boolean };
   parse_mode?: string;
 }
 
@@ -84,7 +85,8 @@ export async function resetAndStubFetch({ nominatim = [] as object[] } = {}): Pr
       if (method === "sendMessage") {
         sent.push(body);
         const messageId = ++nextId;
-        if (body.reply_markup) keyboards.set(String(body.chat_id), messageId);
+        if (body.reply_markup && JSON.parse(body.reply_markup).inline_keyboard)
+          keyboards.set(String(body.chat_id), messageId);
         return Response.json({ ok: true, result: { message_id: messageId, chat: { id: body.chat_id }, date: 0 } });
       }
       if (method === "getMe") {
