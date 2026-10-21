@@ -1,4 +1,4 @@
-import { isValidName, isValidEmail, isValidPhone } from "../helpers/validation";
+import { isValidName, isValidEmail, isValidPhone, isValidNpub, isValidWebsite } from "../helpers/validation";
 import { setStep } from "../helpers/session";
 import { errorMessage, successMessage, promptWithSkip, promptWithOptions, escapeHtml } from "../helpers/messaging";
 import {
@@ -30,12 +30,16 @@ const OSM_TYPE_KEYS = "shop amenity office craft industrial tourism leisure heal
   " "
 );
 const OSM_MAX_RESULTS = 8;
+// Room for the OpenStreetMap details within Telegram's 4096-character message limit.
+const OSM_DETAILS_MAX_LENGTH = 3500;
+const ORG_MAX_RESULTS = 5;
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-// Words, digits and common punctuation in any script ("Café", "Bäckerei"); not a phone number or email.
+// Any name with at least one letter, in any script, with common punctuation ("’t Hoekje",
+// "Café (Leeuwarden)"). The letter keeps out phone numbers, "@" keeps out email addresses.
 function isValidOrganizationName(name: string | undefined): name is string {
-  return !!name && !/^\d+$/.test(name) && !/@/.test(name) && !/[^\p{L}\p{N}\s&\-,.'"]/u.test(name);
+  return !!name && /\p{L}/u.test(name) && !name.includes("@") && !/\p{Cc}/u.test(name);
 }
 
 async function addContact(
@@ -170,20 +174,18 @@ async function lookupOsmAndContinue(
   persistSession: () => Promise<void>,
   removeSession: () => Promise<void>
 ) {
-  const regions = [...new Set((session.organization_communities || []).map(c => c.region).filter(Boolean))];
-  const query = {
-    name: session.organization ?? "",
-    phone: session.phone,
-    website: session.organization_website,
-    email: session.email
-  };
+  const regions = (session.organization_communities || []).map(c => c.region).filter((r): r is string => !!r);
   await sendMessage(env, chatId, "Searching for OpenStreetMap locations... ⏳");
   let osmResults: OsmResult[] = [];
   try {
-    osmResults =
-      regions.length > 0
-        ? (await Promise.all(regions.map(region => findOsmNodeForOrganization({ ...query, region })))).flat()
-        : await findOsmNodeForOrganization({ ...query, region: null });
+    // One lookup for all regions: it deduplicates the results and spaces the Nominatim requests.
+    osmResults = await findOsmNodeForOrganization({
+      name: session.organization ?? "",
+      regions,
+      phone: session.phone,
+      website: session.organization_website,
+      email: session.email
+    });
   } catch {
     osmResults = [];
   }
@@ -192,11 +194,22 @@ async function lookupOsmAndContinue(
     await addOrganizationAndContact(sendMessage, env, chatId, session, removeSession, null);
     return;
   }
+  // Whole items only: a cut inside an HTML tag makes Telegram refuse the entire message.
+  const items: string[] = [];
+  let length = 0;
+  for (const item of osmResults) {
+    const formatted = formatOsmItem(item);
+    const added = (items.length > 0 ? 2 : 0) + formatted.length;
+    if (items.length > 0 && length + added > OSM_DETAILS_MAX_LENGTH) break;
+    items.push(formatted);
+    length += added;
+  }
+  const more = items.length < osmResults.length ? `\n\nShowing ${items.length} of ${osmResults.length} locations.` : "";
+  osmResults = osmResults.slice(0, items.length);
   session.osm_options = osmResults.map(item => String(item.id));
   setStep(session, "awaiting_osm_node");
   await persistSession();
-  let details = osmResults.map(formatOsmItem).join("\n\n");
-  if (details.length > 3500) details = `${details.slice(0, 3500)}\n…`;
+  const details = items.join("\n\n") + more;
   const keyboard = osmResults.map(item => [{ text: `# ${item.osm_id}`, callback_data: `osmnode:${item.id}` }]);
   keyboard.push([{ text: "None of the above", callback_data: "osmnode:none" }]);
   await sendMessage(env, chatId, `Select the correct OpenStreetMap location for this organization:\n\n${details}`, {
@@ -268,10 +281,13 @@ export const handleContactFlow: FlowHandler = async (
     }
     case "awaiting_nostr": {
       let nostr = text && text.trim();
-      if (text === undefined || session.last_callback_data === "skip") {
+      if (text === undefined || session.last_callback_data === "skip" || nostr?.toLowerCase() === "skip") {
         nostr = undefined;
+      } else if (nostr && !isValidNpub(nostr)) {
+        await sendMessage(env, chatId, errorMessage("Please enter a valid nostr npub (npub1…) or tap Skip."));
+        return;
       }
-      session.nostr_npub = nostr && nostr.toLowerCase() !== "skip" ? nostr : null;
+      session.nostr_npub = nostr || null;
       setStep(session, "awaiting_type");
       await persistSession();
       const types = [
@@ -360,7 +376,8 @@ export const handleContactFlow: FlowHandler = async (
         return;
       }
       try {
-        const orgs = (await env.crmApi.searchOrganizations({ name: org })).slice(0, 5);
+        const found = await env.crmApi.searchOrganizations({ name: org });
+        const orgs = found.slice(0, ORG_MAX_RESULTS);
         // Names stay in the session; buttons carry only ids (callback_data is limited to 64 bytes).
         session.pending_org = org;
         session.org_choices = Object.fromEntries(orgs.map(o => [String(o.id), o.name]));
@@ -368,7 +385,11 @@ export const handleContactFlow: FlowHandler = async (
         if (orgs.length > 0) {
           const keyboard = orgs.map(o => [{ text: o.name, callback_data: `select_org:${o.id}` }]);
           keyboard.push([{ text: `Create new "${org}"`, callback_data: "create_org" }]);
-          await sendMessage(env, chatId, "Select an existing organization or create new:", {
+          const more =
+            found.length > orgs.length
+              ? ` Showing ${orgs.length} of ${found.length}; type more of the name to narrow it down.`
+              : "";
+          await sendMessage(env, chatId, `Select an existing organization or create new:${more}`, {
             reply_markup: { inline_keyboard: keyboard }
           });
         } else {
@@ -405,8 +426,15 @@ export const handleContactFlow: FlowHandler = async (
     }
     case "awaiting_org_website": {
       let website = text && text.trim();
-      if (session.last_callback_data === "skip") {
+      if (text === undefined || session.last_callback_data === "skip" || website?.toLowerCase() === "skip") {
         website = undefined;
+      } else if (website && !isValidWebsite(website)) {
+        await sendMessage(
+          env,
+          chatId,
+          errorMessage("Please enter a valid website (for example example.com) or tap Skip.")
+        );
+        return;
       }
       session.organization_website = website || null;
       setStep(session, "awaiting_org_nostr");
@@ -417,10 +445,13 @@ export const handleContactFlow: FlowHandler = async (
     }
     case "awaiting_org_nostr": {
       let nostr = text && text.trim();
-      if (text === undefined || session.last_callback_data === "skip") {
+      if (text === undefined || session.last_callback_data === "skip" || nostr?.toLowerCase() === "skip") {
         nostr = undefined;
+      } else if (nostr && !isValidNpub(nostr)) {
+        await sendMessage(env, chatId, errorMessage("Please enter a valid nostr npub (npub1…) or tap Skip."));
+        return;
       }
-      session.organization_nostr_npub = nostr && nostr.toLowerCase() !== "skip" ? nostr : null;
+      session.organization_nostr_npub = nostr || null;
       session.org_picker = await startCommunityPicker(env, session.telegram_id);
       setStep(session, "awaiting_communities");
       await persistSession();
@@ -476,5 +507,9 @@ export const handleContactFlow: FlowHandler = async (
       );
       break;
     }
+    default:
+      await sendMessage(env, chatId, errorMessage("Unknown step in contact flow. Type /cancel to start over."));
+      await removeSession();
+      break;
   }
 };
