@@ -30,7 +30,6 @@ export interface Session {
   // team_members.id of the user running the flow
   created_by?: number | null;
   last_callback_data?: string | null;
-  unauthorizedMessageSent?: boolean;
 
   // contact flow
   name?: string;
@@ -78,3 +77,36 @@ export type FlowHandler = (
   persistSession?: () => Promise<void>,
   removeSession?: () => Promise<void>
 ) => Promise<void>;
+
+// The parts of a Telegram Update this bot reads.
+export interface TelegramUpdate {
+  message?: {
+    chat?: { id: number; type: string };
+    from?: { id: number };
+    text?: string;
+  };
+  callback_query?: {
+    id: string;
+    data?: string;
+    from: { id: number };
+    message: { chat: { id: number } };
+  };
+}
+
+// What the webhook answers Telegram for one update.
+export interface UpdateResult {
+  status: number;
+  body: string;
+}
+
+/**
+ * State of one chat: the session of the flow in progress, and whether the
+ * "not authorized" message was sent recently. Kept in the chat's Durable Object.
+ */
+export interface SessionStore {
+  getSession(): Session | undefined;
+  putSession(session: Session): void;
+  deleteSession(): void;
+  wasUnauthorizedNotified(): boolean;
+  markUnauthorizedNotified(): void;
+}

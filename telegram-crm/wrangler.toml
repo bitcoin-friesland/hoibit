@@ -12,6 +12,11 @@ preview_urls = true
 binding = "crmApi"
 service = "crm-api"
 
-[[kv_namespaces]]
-binding = "SESSIONS"
-id = "06abc28c5b324621a4cf7d76c1288bb8"
+# One Durable Object per chat holds the chat's session (src/chat.ts).
+[[durable_objects.bindings]]
+name = "CHATS"
+class_name = "ChatSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatSession"]
