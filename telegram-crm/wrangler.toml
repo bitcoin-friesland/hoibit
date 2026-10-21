@@ -12,6 +12,12 @@ preview_urls = true
 binding = "crmApi"
 service = "crm-api"
 
+# RPC to mail-to-tg: the spam button under each email (class SpamButtons in mail-to-tg/src/buttons.ts).
+[[services]]
+binding = "mailToTg"
+service = "mail-to-tg"
+entrypoint = "SpamButtons"
+
 # One Durable Object per chat holds the chat's session (src/chat.ts).
 [[durable_objects.bindings]]
 name = "CHATS"

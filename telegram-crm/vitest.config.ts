@@ -11,8 +11,11 @@ export default defineConfig(async () => {
         wrangler: { configPath: "./wrangler.toml" },
         miniflare: {
           d1Databases: ["DB"],
-          // The crm-api Worker does not run here; the harness passes the CrmApi class instead.
-          serviceBindings: { crmApi: () => new Response("crm-api is not available in tests", { status: 500 }) },
+          // crm-api and mail-to-tg do not run here; the harness passes stand-ins instead.
+          serviceBindings: {
+            crmApi: () => new Response("crm-api is not available in tests", { status: 500 }),
+            mailToTg: () => new Response("mail-to-tg is not available in tests", { status: 500 })
+          },
           bindings: { TEST_MIGRATIONS: migrations }
         }
       })

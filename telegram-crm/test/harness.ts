@@ -13,11 +13,31 @@ export const BOT_USERNAME = "HoiBitBot";
 // env.DB is a test-only D1 for crm-api. The bot gets the CrmApi class itself as its
 // crmApi binding; crm-api's own tests cover the real RPC stub.
 const crmApi = new CrmApi(createExecutionContext(), { DB: env.DB });
+// Stands in for mail-to-tg's SpamButtons; mail-to-tg's own tests cover the real one.
+let spamPresses: { data: string; chatId: number; messageId: number }[] = [];
+let spamAnswer: () => Promise<string> = async () => "Delete this email and block its sender?";
+const mailToTg = {
+  press: async (data: string, chatId: number, messageId: number) => {
+    spamPresses.push({ data, chatId, messageId });
+    return spamAnswer();
+  }
+};
 export const workerEnv = {
   TELEGRAM_TOKEN: "test-token",
   TELEGRAM_WEBHOOK_SECRET: SECRET,
-  crmApi: crmApi as unknown as Env["crmApi"]
+  crmApi: crmApi as unknown as Env["crmApi"],
+  mailToTg: mailToTg as unknown as Env["mailToTg"]
 } as Env;
+
+// The spam button presses passed on to mail-to-tg in the current test.
+export function spamButtonPresses() {
+  return spamPresses;
+}
+
+// What mail-to-tg answers a spam button press with, until the next reset.
+export function answerSpamButtons(answer: () => Promise<string>) {
+  spamAnswer = answer;
+}
 
 const DATA_TABLES = [
   "audit_log",
@@ -75,6 +95,8 @@ export async function resetAndStubFetch({ nominatim = [] as object[] } = {}): Pr
   keyboards = new Map();
   answers = [];
   lastDelivered = undefined;
+  spamPresses = [];
+  spamAnswer = async () => "Delete this email and block its sender?";
 
   const sent: SentMessage[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
