@@ -183,6 +183,76 @@ describe("newOrg", () => {
   });
 });
 
+describe("logConversation", () => {
+  async function createContact() {
+    const res = await crm.newContact({ name: "Alice", type: "consumer" });
+    if (!res.ok) throw new Error(res.error);
+    return res.id;
+  }
+
+  it("stores the conversation with its team member and an audit entry for it", async () => {
+    const adminId = await createFirstUser();
+    const contactId = await createContact();
+    const res = await crm.logConversation({
+      contact_id: String(contactId),
+      channel: "phone",
+      note: "Interested in a Lightning terminal",
+      created_by: adminId
+    });
+    if (!res.ok) throw new Error(res.error);
+
+    const row = await env.DB.prepare("SELECT contact_id, channel, note, created_by FROM conversations WHERE id = ?")
+      .bind(res.id)
+      .first();
+    expect(row).toEqual({
+      contact_id: contactId,
+      channel: "phone",
+      note: "Interested in a Lightning terminal",
+      created_by: adminId
+    });
+    const audit = await env.DB.prepare(
+      "SELECT action, record_id, performed_by, change_details FROM audit_log WHERE table_name = 'conversations'"
+    ).first<{ change_details: string }>();
+    expect(audit).toMatchObject({ action: "insert", record_id: String(res.id), performed_by: adminId });
+    expect(JSON.parse(audit!.change_details)).toEqual({
+      fields: {
+        contact_id: { old: null, new: contactId },
+        channel: { old: null, new: "phone" },
+        note: { old: null, new: "Interested in a Lightning terminal" }
+      }
+    });
+  });
+
+  it("refuses a missing or unknown contact and an unknown channel", async () => {
+    const contactId = await createContact();
+    expect(await crm.logConversation({ contact_id: "", channel: "phone" })).toMatchObject({ ok: false, status: 400 });
+    expect(await crm.logConversation({ contact_id: 9999, channel: "phone" })).toMatchObject({
+      ok: false,
+      status: 404
+    });
+    expect(await crm.logConversation({ contact_id: contactId, channel: "pigeon" })).toMatchObject({
+      ok: false,
+      status: 400
+    });
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM conversations").first();
+    expect(count).toEqual({ n: 0 });
+  });
+});
+
+describe("searchContacts", () => {
+  it("finds contacts by part of the name, ordered by name, with their organization", async () => {
+    const org = await crm.newOrg({ name: "Cafe Satoshi", status: 2 });
+    if (!org.ok) throw new Error(org.error);
+    await crm.newContact({ name: "Johan", type: "consumer" });
+    await crm.newContact({ name: "anja", type: "entrepreneur", organization_id: org.id });
+    await crm.newContact({ name: "Bob", type: "consumer" });
+    expect(await crm.searchContacts("AN")).toMatchObject([
+      { name: "anja", organization_name: "Cafe Satoshi" },
+      { name: "Johan", organization_name: null }
+    ]);
+  });
+});
+
 describe("lookups", () => {
   it("lists countries and communities per country", async () => {
     expect(await crm.communityCountries()).toEqual(expect.arrayContaining(["Netherlands", "Belgium"]));
