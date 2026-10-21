@@ -51,8 +51,11 @@ export interface Session {
   time_zone?: string;
 
   // conversation flow
-  contact_name?: string;
-  note?: string;
+  contact_choices?: Record<string, string>;
+  contact_id?: number;
+  contact_label?: string;
+  channel_choices?: Record<string, string>;
+  channel?: string;
 
   // team member flow
   invite_id?: string;

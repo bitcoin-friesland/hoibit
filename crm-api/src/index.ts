@@ -396,6 +396,7 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       query += " AND contacts.name LIKE ? COLLATE NOCASE";
       params.push(`%${name}%`);
     }
+    query += " ORDER BY contacts.name COLLATE NOCASE, contacts.id";
     const { results } = await this.db
       .prepare(query)
       .bind(...params)
@@ -482,35 +483,41 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return { ok: true, id: lastId(results) };
   }
 
-  // Note: the live conversations table has no created_by column yet, so this fails until
-  // the /logconversation flow and the schema are fixed.
-  async logConversation(data: LogConversationInput): Promise<Result> {
+  // One transaction: the conversation and its audit entry.
+  async logConversation(data: LogConversationInput): Promise<Result<{ id: number }>> {
     if (!data.contact_id) return refuse(400, "Missing contact_id (must be unique, selected from UI)");
     if (!data.channel) return refuse(400, "Missing channel");
     const contactId = toInt(data.contact_id);
+    const known = await this.db
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM contacts WHERE id = ?) AS contact,
+                EXISTS (SELECT 1 FROM channels WHERE id = ?) AS channel`
+      )
+      .bind(contactId, data.channel)
+      .first<{ contact: 0 | 1; channel: 0 | 1 }>();
+    if (!known?.contact) return refuse(404, "Contact not found");
+    if (!known.channel) return refuse(400, "Unknown channel");
     const createdBy = toIntOrNull(data.created_by);
-    await this.db
-      .prepare(`INSERT INTO conversations (contact_id, channel, note, created_by) VALUES (?, ?, ?, ?)`)
-      .bind(contactId, data.channel, data.note ?? null, createdBy)
-      .run();
-    await this.db
-      .prepare(auditSql())
-      .bind(
+    const note = data.note || null;
+    const results = await this.db.batch([
+      this.db
+        .prepare(`INSERT INTO conversations (contact_id, channel, note, created_by) VALUES (?, ?, ?, ?)`)
+        .bind(contactId, data.channel, note, createdBy),
+      this.db.prepare(auditSql(insertedIdText("conversations"))).bind(
         "insert",
         "conversations",
-        String(data.contact_id),
         createdBy,
         JSON.stringify({
           fields: {
             contact_id: created(contactId),
             channel: created(data.channel),
-            note: created(data.note ?? null),
-            created_by: created(createdBy)
+            ...(note ? { note: created(note) } : {})
           }
         })
-      )
-      .run();
-    return { ok: true };
+      ),
+      this.db.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'conversations'`)
+    ]);
+    return { ok: true, id: lastId(results) };
   }
 
   // Replaces the communities of an organization.

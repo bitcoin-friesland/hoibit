@@ -152,6 +152,66 @@ describe("/newcontact", () => {
   });
 });
 
+describe("/logconversation", () => {
+  async function addContact(name: string) {
+    return env.DB.prepare("INSERT INTO contacts (name, type) VALUES (?, 'consumer') RETURNING id")
+      .bind(name)
+      .first<number>("id");
+  }
+
+  it("logs a conversation with the chosen contact and channel", async () => {
+    const adminId = await addAdmin(ADMIN);
+    const contactId = await addContact("Alice");
+    await addContact("Bob");
+    const chat = chatAs(ADMIN);
+    await chat.text("/logconversation");
+    expect(lastText()).toBe("Which contact did you talk to? Type part of the name.");
+    await chat.text("ali");
+    expect(lastText()).toBe("Select the contact:");
+    expect(JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard).toEqual([
+      [{ text: "Alice", callback_data: `select_contact:${contactId}` }]
+    ]);
+    await chat.press(`select_contact:${contactId}`);
+    expect(lastText()).toBe("How did you talk to Alice?");
+    await chat.press("channel:phone");
+    expect(lastText()).toBe("What was discussed? (minimum 5 characters)");
+    await chat.text("Wants to accept Lightning payments");
+    expect(lastText()).toBe("✅ Conversation with Alice (Phone) logged.");
+
+    const row = await env.DB.prepare(
+      `SELECT c.contact_id, c.channel, c.note, c.created_by, a.performed_by
+       FROM conversations c
+       JOIN audit_log a ON a.table_name = 'conversations' AND a.record_id = CAST(c.id AS TEXT)`
+    ).first();
+    expect(row).toEqual({
+      contact_id: contactId,
+      channel: "phone",
+      note: "Wants to accept Lightning payments",
+      created_by: adminId,
+      performed_by: adminId
+    });
+  });
+
+  it("asks again when no contact matches or a button is not from the list", async () => {
+    await addAdmin(ADMIN);
+    const contactId = await addContact("Alice");
+    const chat = chatAs(ADMIN);
+    await chat.text("/logconversation");
+    await chat.text("zed");
+    expect(lastText()).toBe(
+      'No contact found with the name "zed". Type another name, or add the contact first with /newcontact.'
+    );
+    await chat.press(`select_contact:${contactId}`);
+    expect(lastText()).toBe("❌ Please choose a contact from the buttons, or type a name.");
+    await chat.text("alice");
+    await chat.press(`select_contact:${contactId}`);
+    await chat.press("channel:pigeon");
+    expect(lastText()).toBe("❌ Please choose a channel from the buttons.");
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM conversations").first();
+    expect(count).toEqual({ n: 0 });
+  });
+});
+
 describe("/invite", () => {
   it("is refused for non-admins", async () => {
     await addAdmin(ADMIN);

@@ -175,9 +175,9 @@ export async function processUpdate(env: Env, store: SessionStore, update: Teleg
     return reply("OK");
   }
   if (text === "/logconversation") {
-    session = { step: "awaiting_contact_name", created_by: createdBy, telegram_id: userId, mode: "conversation" };
+    session = { step: "awaiting_contact", created_by: createdBy, telegram_id: userId, mode: "conversation" };
     store.putSession(session);
-    await handleConversationFlow(sendMessage, env, chatId, text, session, persistSession, removeSession);
+    await sendMessage(env, chatId, "Which contact did you talk to? Type part of the name.");
     return reply("OK");
   }
   if ((text === "/invite" || text === "/teammember") && !isAdmin) {
