@@ -77,6 +77,8 @@ export interface SetAdminInput {
   updated_by: RowId | null;
 }
 
+// A member with audit history is deactivated (telegram_id and admin rights cleared, communities
+// removed; the row stays for the history), one without is deleted. Both lose access to the bot.
 export interface DeleteTeamMemberInput {
   telegram_id: TelegramId;
   performed_by: RowId | null;
@@ -85,7 +87,12 @@ export interface DeleteTeamMemberInput {
 export interface NewContactInput {
   name: string;
   type: string;
+  // An existing organization. Leave it out when new_organization is given.
   organization_id?: RowId | null;
+  // Creates this organization (with its communities and audit entry) in the same transaction
+  // as the contact, which then belongs to it; nothing is stored if any part fails.
+  // name and status are required; created_by of the contact is also used for the organization.
+  new_organization?: Omit<NewOrgInput, "created_by"> | null;
   email?: string | null;
   phone?: string | null;
   nostr_npub?: string | null;
@@ -114,9 +121,4 @@ export interface OrganizationSearch {
   domain?: string | null;
   email?: string | null;
   community_id?: RowId | null;
-}
-
-export interface SetOrganizationCommunitiesInput {
-  organization_id: RowId;
-  community_ids: RowId[];
 }

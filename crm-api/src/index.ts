@@ -15,7 +15,6 @@ import type {
   Result,
   RowId,
   SetAdminInput,
-  SetOrganizationCommunitiesInput,
   TeamMember,
   TeamMemberSummary,
   TelegramId,
@@ -41,12 +40,23 @@ const refuse = (status: Refusal["status"], error: string): Refusal => ({ ok: fal
 const lastIdSql = (table: string) => `(SELECT seq FROM sqlite_sequence WHERE name = '${table}')`;
 
 // record_id is bound (`?`), or taken from the row inserted earlier in the same batch.
-const auditSql = (recordId = "?") =>
-  `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) VALUES (?, ?, ${recordId}, ?, ?)`;
+// change_details is bound, or an SQL expression around the bound JSON.
+// afterChange: written only when the previous statement of the batch changed exactly one row,
+// so a refused (0 rows) UPDATE or DELETE in the same batch leaves no audit entry.
+const auditSql = (recordId = "?", { details = "?", afterChange = false } = {}) =>
+  `INSERT INTO audit_log (action, table_name, record_id, performed_by, change_details) SELECT ?, ?, ${recordId}, ?, ${details}` +
+  (afterChange ? " WHERE changes() = 1" : "");
 const insertedIdText = (table: string) => `CAST(${lastIdSql(table)} AS TEXT)`;
 
 type Change = { old: unknown; new: unknown };
 const created = (value: unknown): Change => ({ old: null, new: value });
+
+const sortedIds = (ids: number[]) => [...new Set(ids)].sort((a, b) => a - b);
+const sameIds = (a: number[], b: number[]) => a.length === b.length && a.every((id, i) => id === b[i]);
+
+// A team member may be removed (or lose admin rights) unless they are the last admin. Used in
+// the WHERE of the statement itself, so two concurrent requests cannot both pass the check.
+const NOT_LAST_ADMIN = `(is_admin = 0 OR (SELECT COUNT(*) FROM team_members WHERE is_admin = 1) > 1)`;
 
 /**
  * The CRM data API. telegram-crm calls these methods over its crmApi service binding (RPC).
@@ -73,6 +83,14 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return !!row && row.is_admin === 1;
   }
 
+  private async memberCommunityIds(memberId: number): Promise<number[]> {
+    const { results } = await this.db
+      .prepare(`SELECT community_id FROM team_member_communities WHERE team_member_id = ? ORDER BY community_id`)
+      .bind(memberId)
+      .all<{ community_id: number }>();
+    return results.map(r => r.community_id);
+  }
+
   async validateUser(telegramId: TelegramId): Promise<TeamMember | null> {
     return this.db
       .prepare(`SELECT * FROM team_members WHERE telegram_id = ?`)
@@ -80,30 +98,33 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       .first<TeamMember>();
   }
 
+  // Counts deactivated members too, so first-user registration never reopens.
   async countTeamMembers(): Promise<number> {
     const row = await this.db.prepare("SELECT COUNT(*) AS count FROM team_members").first<{ count: number }>();
     return row?.count ?? 0;
   }
 
+  // Active members only: a deactivated member has no telegram_id.
   async listTeamMembers(): Promise<TeamMemberSummary[]> {
     const { results } = await this.db
-      .prepare(`SELECT id, telegram_id, name, is_admin FROM team_members ORDER BY name`)
+      .prepare(`SELECT id, telegram_id, name, is_admin FROM team_members WHERE telegram_id IS NOT NULL ORDER BY name`)
       .all<TeamMemberSummary>();
     return results;
   }
 
   // First user registration: only allowed while there are no team members; the first user is admin.
+  // The check is part of the INSERT, so of two simultaneous first users only one gets in.
   async firstUser(data: FirstUserInput): Promise<Result<{ id: number }>> {
     if (!data.telegram_id || !data.name) return refuse(400, "Missing telegram_id or name");
-    if ((await this.countTeamMembers()) > 0) {
-      return refuse(409, "First user registration not allowed: team members already exist");
-    }
     const timeZone = data.time_zone || null;
     const results = await this.db.batch([
       this.db
-        .prepare(`INSERT INTO team_members (telegram_id, name, time_zone, is_admin) VALUES (?, ?, ?, 1)`)
+        .prepare(
+          `INSERT INTO team_members (telegram_id, name, time_zone, is_admin)
+           SELECT ?, ?, ?, 1 WHERE NOT EXISTS (SELECT 1 FROM team_members)`
+        )
         .bind(String(data.telegram_id), data.name, timeZone),
-      this.db.prepare(auditSql(insertedIdText("team_members"))).bind(
+      this.db.prepare(auditSql(insertedIdText("team_members"), { afterChange: true })).bind(
         "insert",
         "team_members",
         null,
@@ -116,8 +137,12 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
           }
         })
       ),
+      // Only meaningful after an insert; otherwise it holds an older id and is not used.
       this.db.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'team_members'`)
     ]);
+    if (results[0].meta.changes !== 1) {
+      return refuse(409, "First user registration not allowed: team members already exist");
+    }
     return { ok: true, id: lastId(results) };
   }
 
@@ -127,21 +152,40 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (!(await this.isAdmin(data.invited_by))) return refuse(403, "Only admins can add team members");
     const communityIds = (data.community_ids ?? []).map(toInt);
     const existing = await this.db
-      .prepare(`SELECT id FROM team_members WHERE telegram_id = ?`)
+      .prepare(`SELECT id, time_zone FROM team_members WHERE telegram_id = ?`)
       .bind(String(data.telegram_id))
-      .first<{ id: number }>();
+      .first<{ id: number; time_zone: string | null }>();
     if (existing) {
-      const statements = communityIds.map(communityId =>
+      // One transaction: only the real changes, and an audit entry for them.
+      const oldIds = await this.memberCommunityIds(existing.id);
+      const addedIds = sortedIds(communityIds).filter(id => !oldIds.includes(id));
+      const changedFields: Record<string, Change> = {};
+      const statements = addedIds.map(communityId =>
         this.db
           .prepare(`INSERT OR IGNORE INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`)
           .bind(existing.id, communityId)
       );
-      if (data.time_zone) {
+      if (addedIds.length > 0) changedFields.community_ids = { old: oldIds, new: sortedIds([...oldIds, ...addedIds]) };
+      if (data.time_zone && data.time_zone !== existing.time_zone) {
         statements.push(
           this.db.prepare(`UPDATE team_members SET time_zone = ? WHERE id = ?`).bind(data.time_zone, existing.id)
         );
+        changedFields.time_zone = { old: existing.time_zone, new: data.time_zone };
       }
-      if (statements.length > 0) await this.db.batch(statements);
+      if (statements.length > 0) {
+        statements.push(
+          this.db
+            .prepare(auditSql())
+            .bind(
+              "update",
+              "team_members",
+              String(existing.id),
+              toIntOrNull(data.invited_by),
+              JSON.stringify({ fields: changedFields })
+            )
+        );
+        await this.db.batch(statements);
+      }
       return { ok: true, id: existing.id, existing: true };
     }
     const memberIdSql = lastIdSql("team_members");
@@ -163,7 +207,8 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
           fields: {
             telegram_id: created(data.telegram_id),
             name: created(data.name),
-            ...(timeZone ? { time_zone: created(timeZone) } : {})
+            ...(timeZone ? { time_zone: created(timeZone) } : {}),
+            ...(communityIds.length > 0 ? { community_ids: created(communityIds) } : {})
           }
         })
       ),
@@ -183,21 +228,20 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       .first<{ name: string | null; time_zone: string | null }>();
     if (!oldMember) return refuse(404, "Team member not found");
 
+    // One transaction with only the real changes and their audit entry; nothing when nothing changes.
     const statements: D1PreparedStatement[] = [];
     const changedFields: Record<string, Change> = {};
     const setParts: string[] = [];
     const params: string[] = [];
-    if (data.name) {
+    if (data.name && oldMember.name !== data.name) {
       setParts.push("name = ?");
       params.push(data.name);
-      if (oldMember.name !== data.name) changedFields.name = { old: oldMember.name, new: data.name };
+      changedFields.name = { old: oldMember.name, new: data.name };
     }
-    if (data.time_zone) {
+    if (data.time_zone && oldMember.time_zone !== data.time_zone) {
       setParts.push("time_zone = ?");
       params.push(data.time_zone);
-      if (oldMember.time_zone !== data.time_zone) {
-        changedFields.time_zone = { old: oldMember.time_zone, new: data.time_zone };
-      }
+      changedFields.time_zone = { old: oldMember.time_zone, new: data.time_zone };
     }
     if (setParts.length > 0) {
       statements.push(
@@ -205,25 +249,30 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       );
     }
     if (Array.isArray(data.community_ids)) {
-      statements.push(
-        this.db.prepare(`DELETE FROM team_member_communities WHERE team_member_id = ?`).bind(memberId),
-        ...data.community_ids.map(communityId =>
-          this.db
-            .prepare(`INSERT INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`)
-            .bind(memberId, toInt(communityId))
-        )
-      );
-      changedFields.community_ids = { old: "replaced", new: data.community_ids };
+      const oldIds = await this.memberCommunityIds(memberId);
+      const newIds = sortedIds(data.community_ids.map(toInt));
+      if (!sameIds(oldIds, newIds)) {
+        statements.push(
+          this.db.prepare(`DELETE FROM team_member_communities WHERE team_member_id = ?`).bind(memberId),
+          ...newIds.map(communityId =>
+            this.db
+              .prepare(`INSERT INTO team_member_communities (team_member_id, community_id) VALUES (?, ?)`)
+              .bind(memberId, communityId)
+          )
+        );
+        changedFields.community_ids = { old: oldIds, new: newIds };
+      }
     }
+    if (statements.length === 0) return { ok: true };
     statements.push(
       this.db
         .prepare(auditSql())
         .bind(
           "update",
           "team_members",
-          String(data.team_member_id),
+          String(memberId),
           toIntOrNull(data.updated_by),
-          Object.keys(changedFields).length > 0 ? JSON.stringify({ fields: changedFields }) : null
+          JSON.stringify({ fields: changedFields })
         )
     );
     await this.db.batch(statements);
@@ -242,30 +291,32 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (!member) return refuse(404, "Team member not found");
     const newValue = data.is_admin ? 1 : 0;
     if (member.is_admin === newValue) return { ok: true, id: member.id, is_admin: newValue, changed: false };
-    // Revoking only succeeds while another admin remains, checked in the same statement.
-    const res = await this.db
-      .prepare(
-        newValue === 1
-          ? `UPDATE team_members SET is_admin = 1 WHERE id = ?`
-          : `UPDATE team_members SET is_admin = 0 WHERE id = ? AND (SELECT COUNT(*) FROM team_members WHERE is_admin = 1) > 1`
-      )
-      .bind(member.id)
-      .run();
-    if (res.meta.changes !== 1) return refuse(409, "Cannot revoke the last admin");
-    await this.db
-      .prepare(auditSql())
-      .bind(
-        "update",
-        "team_members",
-        String(member.id),
-        toIntOrNull(data.updated_by),
-        JSON.stringify({ fields: { is_admin: { old: member.is_admin, new: newValue } } })
-      )
-      .run();
+    // One transaction: the change and its audit entry. Revoking only succeeds while another
+    // admin remains, checked in the same statement; the audit entry follows only a real change.
+    const [update] = await this.db.batch([
+      this.db
+        .prepare(
+          newValue === 1
+            ? `UPDATE team_members SET is_admin = 1 WHERE id = ?`
+            : `UPDATE team_members SET is_admin = 0 WHERE id = ? AND (SELECT COUNT(*) FROM team_members WHERE is_admin = 1) > 1`
+        )
+        .bind(member.id),
+      this.db
+        .prepare(auditSql("?", { afterChange: true }))
+        .bind(
+          "update",
+          "team_members",
+          String(member.id),
+          toIntOrNull(data.updated_by),
+          JSON.stringify({ fields: { is_admin: { old: member.is_admin, new: newValue } } })
+        )
+    ]);
+    if (update.meta.changes !== 1) return refuse(409, "Cannot revoke the last admin");
     return { ok: true, id: member.id, is_admin: newValue, changed: true };
   }
 
-  async deleteTeamMember(data: DeleteTeamMemberInput): Promise<Result> {
+  // Removes a team member's access. A member with history is deactivated, one without is deleted.
+  async deleteTeamMember(data: DeleteTeamMemberInput): Promise<Result<{ deactivated: boolean }>> {
     if (!data.telegram_id) return refuse(400, "Missing telegram_id");
     if (!(await this.isAdmin(data.performed_by))) return refuse(403, "Only admins can delete team members");
     const oldMember = await this.db
@@ -273,39 +324,80 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       .bind(String(data.telegram_id))
       .first<TeamMember>();
     if (!oldMember) return refuse(404, "Team member not found");
-    if (oldMember.is_admin === 1) {
-      const admins = await this.db
-        .prepare(`SELECT COUNT(*) AS count FROM team_members WHERE is_admin = 1`)
-        .first<{ count: number }>();
-      if (!admins || admins.count <= 1) return refuse(409, "Cannot delete the last admin");
-    }
-    // audit_log.performed_by references team_members(id); history is kept, so a member
-    // who performed audited actions cannot be deleted (foreign key violation).
+    const memberId = oldMember.id;
+    const performedBy = toIntOrNull(data.performed_by);
+    const oldIds = await this.memberCommunityIds(memberId);
+    const lastAdmin = refuse(409, "Cannot delete the last admin");
+
+    // audit_log.performed_by and conversations.created_by reference team_members(id) and the
+    // history is kept, so such a member cannot be deleted. Clearing telegram_id ends their
+    // access (validateUser no longer finds them) while the row keeps the history readable.
     const history = await this.db
-      .prepare(`SELECT COUNT(*) AS count FROM audit_log WHERE performed_by = ?`)
-      .bind(oldMember.id)
-      .first<{ count: number }>();
-    if (history && history.count > 0) return refuse(409, "Team member has audit history and cannot be deleted");
-    // One transaction: community links, the member and the audit entry together.
-    await this.db.batch([
-      this.db.prepare(`DELETE FROM team_member_communities WHERE team_member_id = ?`).bind(oldMember.id),
-      this.db.prepare(`DELETE FROM team_members WHERE id = ?`).bind(oldMember.id),
-      this.db.prepare(auditSql()).bind(
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM audit_log WHERE performed_by = ?)
+             OR EXISTS (SELECT 1 FROM conversations WHERE created_by = ?) AS found`
+      )
+      .bind(memberId, memberId)
+      .first<{ found: 0 | 1 }>();
+    if (history?.found) {
+      // One transaction: deactivate unless last admin, audit only that change, then drop the
+      // communities only if the member was deactivated (telegram_id now NULL).
+      const [update] = await this.db.batch([
+        this.db
+          .prepare(`UPDATE team_members SET telegram_id = NULL, is_admin = 0 WHERE id = ? AND ${NOT_LAST_ADMIN}`)
+          .bind(memberId),
+        this.db.prepare(auditSql("?", { afterChange: true })).bind(
+          "update",
+          "team_members",
+          String(memberId),
+          performedBy,
+          JSON.stringify({
+            fields: {
+              telegram_id: { old: oldMember.telegram_id, new: null },
+              ...(oldMember.is_admin === 1 ? { is_admin: { old: 1, new: 0 } } : {}),
+              ...(oldIds.length > 0 ? { community_ids: { old: oldIds, new: [] } } : {})
+            }
+          })
+        ),
+        this.db
+          .prepare(
+            `DELETE FROM team_member_communities
+             WHERE team_member_id = ? AND (SELECT telegram_id FROM team_members WHERE id = ?) IS NULL`
+          )
+          .bind(memberId, memberId)
+      ]);
+      if (update.meta.changes !== 1) return lastAdmin;
+      return { ok: true, deactivated: true };
+    }
+
+    // One transaction: community links, the member and the audit entry, each only if the
+    // member is not the last admin.
+    const [, deletion] = await this.db.batch([
+      this.db
+        .prepare(
+          `DELETE FROM team_member_communities
+           WHERE team_member_id = ? AND EXISTS (SELECT 1 FROM team_members WHERE id = ? AND ${NOT_LAST_ADMIN})`
+        )
+        .bind(memberId, memberId),
+      this.db.prepare(`DELETE FROM team_members WHERE id = ? AND ${NOT_LAST_ADMIN}`).bind(memberId),
+      this.db.prepare(auditSql("?", { afterChange: true })).bind(
         "delete",
         "team_members",
-        String(oldMember.id),
-        toIntOrNull(data.performed_by),
+        String(memberId),
+        performedBy,
         JSON.stringify({
           fields: {
             telegram_id: { old: oldMember.telegram_id, new: null },
             name: { old: oldMember.name, new: null },
             time_zone: { old: oldMember.time_zone, new: null },
-            is_admin: { old: oldMember.is_admin, new: null }
+            is_admin: { old: oldMember.is_admin, new: null },
+            ...(oldIds.length > 0 ? { community_ids: { old: oldIds, new: [] } } : {})
           }
         })
       )
     ]);
-    return { ok: true };
+    if (deletion.meta.changes !== 1) return lastAdmin;
+    return { ok: true, deactivated: false };
   }
 
   async teamMemberCommunities(telegramId: TelegramId): Promise<Community[]> {
@@ -351,32 +443,52 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return results;
   }
 
-  // Organizations matching all given filters; those in community_id come first.
+  // Organizations matching all given filters; those in community_id come first. One row per
+  // organization: its community columns show community_id if it belongs to it, else its
+  // community with the lowest id.
   async searchOrganizations(search: OrganizationSearch): Promise<OrganizationSearchRow[]> {
-    let query = `
-      SELECT o.id, o.name, o.website, o.location_osm_id, o.status, o.nostr_npub,
-             bc.id AS community_id, bc.name AS community_name, bc.region, bc.country,
-             CASE WHEN oc.community_id = ? THEN 1 ELSE 0 END AS is_priority_community
-      FROM organizations o
-      LEFT JOIN organization_communities oc ON o.id = oc.organization_id
-      LEFT JOIN bitcoin_communities bc ON oc.community_id = bc.id
-      LEFT JOIN contact_emails ce ON o.id = ce.contact_id
-      WHERE 1=1
-    `;
-    const params: (string | number | null)[] = [toIntOrNull(search.community_id)];
+    const priority = toIntOrNull(search.community_id);
+    const filters: string[] = [];
+    const params: (string | number | null)[] = [priority, priority];
     if (search.domain) {
-      query += " AND o.website LIKE ?";
+      filters.push("o.website LIKE ?");
       params.push(`%${search.domain}%`);
     }
     if (search.name) {
-      query += " AND o.name LIKE ? COLLATE NOCASE";
+      filters.push("o.name LIKE ? COLLATE NOCASE");
       params.push(`%${search.name}%`);
     }
     if (search.email) {
-      query += " AND (ce.email LIKE ? OR o.website LIKE ?)";
-      params.push(`%${search.email}%`, `%${search.email}%`);
+      // An email address of one of its contacts, or a website on the address's domain.
+      const domain = search.email.includes("@") ? search.email.slice(search.email.lastIndexOf("@") + 1) : "";
+      const byContact = `EXISTS (SELECT 1 FROM contacts c JOIN contact_emails ce ON ce.contact_id = c.id
+                                 WHERE c.organization_id = o.id AND ce.email LIKE ?)`;
+      if (domain) {
+        filters.push(`(${byContact} OR o.website LIKE ?)`);
+        params.push(`%${search.email}%`, `%${domain}%`);
+      } else {
+        filters.push(byContact);
+        params.push(`%${search.email}%`);
+      }
     }
-    query += " GROUP BY o.id ORDER BY is_priority_community DESC, o.name ASC";
+    const query = `
+      SELECT o.id, o.name, o.website, o.location_osm_id, o.status, o.nostr_npub,
+             bc.id AS community_id, bc.name AS community_name, bc.region, bc.country,
+             m.is_priority_community
+      FROM (
+        SELECT o.id,
+               MAX(CASE WHEN oc.community_id = ? THEN 1 ELSE 0 END) AS is_priority_community,
+               COALESCE(MAX(CASE WHEN oc.community_id = ? THEN oc.community_id END), MIN(oc.community_id))
+                 AS community_id
+        FROM organizations o
+        LEFT JOIN organization_communities oc ON oc.organization_id = o.id
+        ${filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : ""}
+        GROUP BY o.id
+      ) m
+      JOIN organizations o ON o.id = m.id
+      LEFT JOIN bitcoin_communities bc ON bc.id = m.community_id
+      ORDER BY m.is_priority_community DESC, o.name ASC
+    `;
     const { results } = await this.db
       .prepare(query)
       .bind(...params)
@@ -404,16 +516,32 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return results;
   }
 
-  // One transaction: contact, email, phone and audit entry.
-  async newContact(data: NewContactInput): Promise<Result<{ id: number }>> {
+  // One transaction: the new organization (if given), contact, email, phone and audit entries.
+  async newContact(data: NewContactInput): Promise<Result<{ id: number; organization_id: number | null }>> {
     if (!data.name || !data.type) return refuse(400, "Missing required fields: name or type");
+    const newOrganization = data.new_organization;
+    if (newOrganization && data.organization_id) {
+      return refuse(400, "Give either organization_id or new_organization, not both");
+    }
+    if (newOrganization && (!newOrganization.name || !newOrganization.status)) {
+      return refuse(400, "Missing required fields for new_organization: name or status");
+    }
     const contactIdSql = lastIdSql("contacts");
+    const createdBy = toIntOrNull(data.created_by);
     const organizationId = toIntOrNull(data.organization_id);
-    const statements = [
-      this.db
-        .prepare(`INSERT INTO contacts (name, type, organization_id, nostr_npub) VALUES (?, ?, ?, ?)`)
-        .bind(data.name, data.type, organizationId, data.nostr_npub || null)
-    ];
+    const statements = newOrganization ? this.newOrgStatements(newOrganization, createdBy) : [];
+    // A new organization's id is only known inside the batch: taken from sqlite_sequence.
+    statements.push(
+      newOrganization
+        ? this.db
+            .prepare(
+              `INSERT INTO contacts (name, type, organization_id, nostr_npub) VALUES (?, ?, ${lastIdSql("organizations")}, ?)`
+            )
+            .bind(data.name, data.type, data.nostr_npub || null)
+        : this.db
+            .prepare(`INSERT INTO contacts (name, type, organization_id, nostr_npub) VALUES (?, ?, ?, ?)`)
+            .bind(data.name, data.type, organizationId, data.nostr_npub || null)
+    );
     if (data.email) {
       statements.push(
         this.db.prepare(`INSERT INTO contact_emails (contact_id, email) VALUES (${contactIdSql}, ?)`).bind(data.email)
@@ -424,11 +552,14 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
         this.db.prepare(`INSERT INTO contact_phones (contact_id, phone) VALUES (${contactIdSql}, ?)`).bind(data.phone)
       );
     }
+    const details = newOrganization
+      ? `json_set(?, '$.fields.organization_id.new', ${lastIdSql("organizations")})`
+      : "?";
     statements.push(
-      this.db.prepare(auditSql(insertedIdText("contacts"))).bind(
+      this.db.prepare(auditSql(insertedIdText("contacts"), { details })).bind(
         "insert",
         "contacts",
-        toIntOrNull(data.created_by),
+        createdBy,
         JSON.stringify({
           fields: {
             name: created(data.name),
@@ -440,19 +571,31 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
           }
         })
       ),
-      this.db.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'contacts'`)
+      this.db.prepare(`SELECT id, organization_id FROM contacts WHERE id = ${contactIdSql}`)
     );
-    return { ok: true, id: lastId(await this.db.batch(statements)) };
+    const contact = lastRow<{ id: number; organization_id: number | null }>(await this.db.batch(statements));
+    return { ok: true, id: contact.id, organization_id: contact.organization_id };
   }
 
   // One transaction: organization, its communities and the audit entry.
   async newOrg(data: NewOrgInput): Promise<Result<{ id: number }>> {
     if (!data.name || !data.status) return refuse(400, "Missing required fields: name or status");
+    const results = await this.db.batch([
+      ...this.newOrgStatements(data, toIntOrNull(data.created_by)),
+      this.db.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'organizations'`)
+    ]);
+    return { ok: true, id: lastId(results) };
+  }
+
+  // Inserts an organization, its communities and its audit entry, for use in a batch; later
+  // statements of the batch get the new id as lastIdSql("organizations"). name and status are
+  // checked by the caller.
+  private newOrgStatements(data: Omit<NewOrgInput, "created_by">, createdBy: number | null): D1PreparedStatement[] {
     const orgIdSql = lastIdSql("organizations");
     const status = toInt(data.status);
     const osmId = data.location_osm_id ? String(data.location_osm_id) : null;
     const communityIds = (data.community_ids ?? []).map(toInt);
-    const results = await this.db.batch([
+    return [
       this.db
         .prepare(
           `INSERT INTO organizations (name, status, location_osm_id, website, nostr_npub) VALUES (?, ?, ?, ?, ?)`
@@ -466,7 +609,7 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       this.db.prepare(auditSql(insertedIdText("organizations"))).bind(
         "insert",
         "organizations",
-        toIntOrNull(data.created_by),
+        createdBy,
         JSON.stringify({
           fields: {
             name: created(data.name),
@@ -477,10 +620,8 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
             ...(communityIds.length > 0 ? { community_ids: created(communityIds) } : {})
           }
         })
-      ),
-      this.db.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'organizations'`)
-    ]);
-    return { ok: true, id: lastId(results) };
+      )
+    ];
   }
 
   // One transaction: the conversation and its audit entry.
@@ -519,26 +660,14 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     ]);
     return { ok: true, id: lastId(results) };
   }
+}
 
-  // Replaces the communities of an organization.
-  async setOrganizationCommunities(data: SetOrganizationCommunitiesInput): Promise<Result> {
-    if (!data.organization_id || !Array.isArray(data.community_ids)) {
-      return refuse(400, "Missing organization_id or community_ids");
-    }
-    const orgId = toInt(data.organization_id);
-    await this.db.batch([
-      this.db.prepare(`DELETE FROM organization_communities WHERE organization_id = ?`).bind(orgId),
-      ...data.community_ids.map(communityId =>
-        this.db
-          .prepare(`INSERT INTO organization_communities (organization_id, community_id) VALUES (?, ?)`)
-          .bind(orgId, toInt(communityId))
-      )
-    ]);
-    return { ok: true };
-  }
+// The first row of the batch's last statement.
+function lastRow<T>(results: D1Result[]): T {
+  return results[results.length - 1].results[0] as T;
 }
 
 // The batches above end with `SELECT seq AS id FROM sqlite_sequence ...`.
 function lastId(results: D1Result[]): number {
-  return (results[results.length - 1].results[0] as { id: number }).id;
+  return lastRow<{ id: number }>(results).id;
 }
