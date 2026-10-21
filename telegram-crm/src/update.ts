@@ -67,9 +67,15 @@ async function callTelegram<T>(env: Env, method: string, body: object): Promise<
   return data.result;
 }
 
+// SendOptions as the Bot API takes them, plus what asQuestion adds in a group.
+interface ApiSendOptions extends Omit<SendOptions, "reply_markup"> {
+  reply_markup?: SendOptions["reply_markup"] | { force_reply: true; selective?: boolean };
+  reply_parameters?: { message_id: number; allow_sending_without_reply: true };
+}
+
 // Sends a message; returns its message_id, or undefined when Telegram did not send it.
-async function sendMessage(env: Env, chatId: ChatId, text: string, options: SendOptions = {}) {
-  const { reply_markup, ...rest } = options;
+async function sendMessage(env: Env, chatId: ChatId, text: string, options: ApiSendOptions = {}) {
+  const { reply_markup, accepts_text: _, ...rest } = options;
   const message = await callTelegram<{ message_id: number }>(env, "sendMessage", {
     chat_id: chatId,
     text,
@@ -110,6 +116,36 @@ async function parseCommand(env: Env, text: string) {
 
 const reply = (body: string): UpdateResult => ({ status: 200, body });
 
+const REPLY_HINT = "↩️ To type an answer, reply to this message.";
+
+/**
+ * Turns the question that ends a turn into one a group can answer. With privacy
+ * mode on, Telegram only gives a bot the commands in a group and the replies to
+ * its own messages, so a plain answer would never arrive. A question without
+ * buttons asks for a reply, which Telegram opens for the user it answers
+ * (replyTo, their message); buttons cannot be combined with that, so a question
+ * with buttons that also takes text says how to answer instead. Private chats
+ * (positive ids) need none of this.
+ */
+function asQuestion(
+  chatId: ChatId,
+  text: string,
+  options: SendOptions = {},
+  replyTo?: number
+): [string, ApiSendOptions] {
+  if (Number(chatId) > 0) return [text, options];
+  if (options.reply_markup) return [options.accepts_text ? `${text}\n\n${REPLY_HINT}` : text, options];
+  if (replyTo === undefined) return [text, { ...options, reply_markup: { force_reply: true } }];
+  return [
+    text,
+    {
+      ...options,
+      reply_markup: { force_reply: true, selective: true },
+      reply_parameters: { message_id: replyTo, allow_sending_without_reply: true }
+    }
+  ];
+}
+
 // The chat a Telegram update belongs to; updates without one are ignored.
 export function chatIdOf(update: TelegramUpdate): ChatId | undefined {
   return update.callback_query ? update.callback_query.message?.chat?.id : update.message?.chat?.id;
@@ -138,7 +174,10 @@ export async function processUpdate(env: Env, store: SessionStore, update: Teleg
 /**
  * Runs the step of session's flow for userId. The flow gets a sendMessage that
  * records the message_id of every message with buttons in the session, so only
- * buttons of the latest keyboard count (see handleButton).
+ * buttons of the latest keyboard count (see handleButton). The last message is
+ * held back until the flow is done: when the session is still open it is the
+ * question for the next step and goes out through asQuestion. replyTo is the
+ * user's message, absent when they pressed a button.
  */
 async function runFlow(
   env: Env,
@@ -146,7 +185,8 @@ async function runFlow(
   chatId: ChatId,
   userId: string,
   session: Session,
-  text: string | undefined
+  text: string | undefined,
+  replyTo?: number
 ) {
   const flow = session.mode && FLOWS[session.mode];
   if (!flow) {
@@ -163,14 +203,29 @@ async function runFlow(
     removed = true;
     store.deleteSession(userId);
   };
-  const send: SendMessage = async (env, chatId, text, options) => {
+  const deliver = async (chatId: ChatId, text: string, options?: ApiSendOptions) => {
     const messageId = await sendMessage(env, chatId, text, options);
-    if (options?.reply_markup && messageId !== undefined && !removed) {
+    if (options?.reply_markup && "inline_keyboard" in options.reply_markup && messageId !== undefined && !removed) {
       session.keyboard_message_id = messageId;
       store.putSession(userId, session);
     }
   };
-  await flow(send, env, chatId, text, session, persistSession, removeSession);
+  let last: [ChatId, string, SendOptions | undefined] | undefined;
+  const send: SendMessage = async (_env, chatId, text, options) => {
+    if (last) await deliver(...last);
+    last = [chatId, text, options];
+  };
+  let done = false;
+  try {
+    await flow(send, env, chatId, text, session, persistSession, removeSession);
+    done = true;
+  } finally {
+    if (last) {
+      const [chatId, text, options] = last;
+      if (done && !removed) await deliver(chatId, ...asQuestion(chatId, text, options, replyTo));
+      else await deliver(chatId, text, options);
+    }
+  }
 }
 
 async function handleButton(
@@ -254,7 +309,12 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
       await sendMessage(
         env,
         chatId,
-        "Welcome! You are the first user. Please enter your name to register as the first team member:"
+        ...asQuestion(
+          chatId,
+          "Welcome! You are the first user. Please enter your name to register as the first team member:",
+          {},
+          message.message_id
+        )
       );
       return reply("OK");
     }
@@ -265,7 +325,7 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
   // Starts a new flow for this user, replacing any flow they had.
   async function startFlow(newSession: Session, prompt: string) {
     store.putSession(userId!, newSession);
-    await sendMessage(env, chatId!, prompt);
+    await sendMessage(env, chatId!, ...asQuestion(chatId!, prompt, {}, message!.message_id));
     return reply("OK");
   }
 
@@ -320,7 +380,7 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
         }
         session = { step: "teammember_menu", mode: "teammember", ...owner };
         store.putSession(userId, session);
-        await runFlow(env, store, chatId, userId, session, text);
+        await runFlow(env, store, chatId, userId, session, text, message.message_id);
         return reply("OK");
       default:
         // Never hand a command to a flow as input, e.g. as the note of a conversation.
@@ -341,6 +401,6 @@ async function handleMessage(env: Env, store: SessionStore, message: TelegramUpd
   }
   // Text answers the current step; a button pressed earlier must not count for it.
   session.last_callback_data = null;
-  await runFlow(env, store, chatId, userId, session, text);
+  await runFlow(env, store, chatId, userId, session, text, message.message_id);
   return reply("OK");
 }

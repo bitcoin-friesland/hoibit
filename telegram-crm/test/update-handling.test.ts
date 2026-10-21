@@ -126,6 +126,17 @@ describe("input routing", () => {
     expect(lastText()).toContain("Available commands");
   });
 
+  it("asks questions in a private chat without reply request or hint", async () => {
+    await addAdmin(ADMIN);
+    await chatAs(ADMIN).text("/newcontact");
+    await chatAs(ADMIN).text("Alice");
+    expect(sent.map(m => [m.text, m.reply_parameters])).toEqual([
+      ["What is the contact name?", undefined],
+      ["What is the email address of the contact? (optional)", undefined]
+    ]);
+    expect(sent[0].reply_markup).toBeUndefined();
+  });
+
   it("still answers ordinary text without a flow in a private chat", async () => {
     await addAdmin(ADMIN);
     await chatAs(ADMIN).text("hello");
@@ -175,6 +186,67 @@ describe("group chats", () => {
     expect(sent).toHaveLength(before);
     expect(lastAnswer()).toMatchObject({ text: "This button has expired. Start again with /help." });
     expect(group.sessionOf(ADMIN)).toMatchObject({ step: "awaiting_email" });
+  });
+
+  it("asks a question without buttons as a reply to the member who started the flow", async () => {
+    await addAdmin(ADMIN);
+    await groupChat().as(ADMIN).text("/newcontact");
+    const question = sent[sent.length - 1];
+    expect(question.text).toBe("What is the contact name?");
+    expect(JSON.parse(question.reply_markup!)).toEqual({ force_reply: true, selective: true });
+    expect(question.reply_parameters).toEqual({ message_id: expect.any(Number), allow_sending_without_reply: true });
+  });
+
+  it("tells how to type an answer when a question has buttons", async () => {
+    await addAdmin(ADMIN);
+    const admin = groupChat().as(ADMIN);
+    await admin.text("/newcontact");
+    await admin.text("Alice");
+    const question = sent[sent.length - 1];
+    expect(question.text).toBe(
+      "What is the email address of the contact? (optional)\n\n↩️ To type an answer, reply to this message."
+    );
+    expect(JSON.parse(question.reply_markup!)).toEqual({
+      inline_keyboard: [[{ text: "Skip", callback_data: "skip" }]]
+    });
+  });
+
+  it("leaves a question with only buttons as it is", async () => {
+    await addAdmin(ADMIN);
+    const admin = groupChat().as(ADMIN);
+    await admin.text("/newcontact");
+    await admin.text("Alice");
+    await admin.press("skip");
+    await admin.press("skip");
+    await admin.press("skip");
+    expect(lastText()).toBe("What type of contact is this?");
+  });
+
+  it("asks for a reply after a button press, without a message to answer", async () => {
+    await addAdmin(ADMIN);
+    const contactId = await addContact("Alice");
+    const admin = groupChat().as(ADMIN);
+    await admin.text("/logconversation");
+    await admin.text("ali");
+    await admin.press(`select_contact:${contactId}`);
+    await admin.press("channel:phone");
+    const question = sent[sent.length - 1];
+    expect(JSON.parse(question.reply_markup!)).toEqual({ force_reply: true });
+    expect(question.reply_parameters).toBeUndefined();
+  });
+
+  it("does not ask for a reply once the flow is done", async () => {
+    await addAdmin(ADMIN);
+    const contactId = await addContact("Alice");
+    const group = groupChat();
+    const admin = group.as(ADMIN);
+    await admin.text("/logconversation");
+    await admin.text("ali");
+    await admin.press(`select_contact:${contactId}`);
+    await admin.press("channel:phone");
+    await admin.text("Talked about a Lightning terminal");
+    expect(group.sessionOf(ADMIN)).toBeUndefined();
+    expect(sent[sent.length - 1].reply_markup).toBeUndefined();
   });
 
   it("T3 ordinary chatter without an active flow gets no reply", async () => {

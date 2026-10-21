@@ -261,7 +261,10 @@ export async function handleOrganizationStep(
       setStep(session, "awaiting_org_website");
       await persistSession();
       const prompt = promptWithSkip("What is the website of the organization? (optional)");
-      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
+      await sendMessage(env, chatId, prompt.text, {
+        reply_markup: prompt.reply_markup,
+        accepts_text: prompt.accepts_text
+      });
       return true;
     }
     case "awaiting_org_website": {
@@ -280,7 +283,10 @@ export async function handleOrganizationStep(
       setStep(session, "awaiting_org_nostr");
       await persistSession();
       const prompt = promptWithSkip("What is the nostr npub of the organization? (optional)");
-      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
+      await sendMessage(env, chatId, prompt.text, {
+        reply_markup: prompt.reply_markup,
+        accepts_text: prompt.accepts_text
+      });
       return true;
     }
     case "awaiting_org_nostr": {

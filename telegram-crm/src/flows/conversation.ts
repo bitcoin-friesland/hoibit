@@ -75,7 +75,8 @@ export const handleConversationFlow: FlowHandler = async (
           reply_markup: {
             // Not Object.entries(choices): it would order the numeric ids, not the names.
             inline_keyboard: shown.map(c => [{ text: choices[String(c.id)], callback_data: `select_contact:${c.id}` }])
-          }
+          },
+          accepts_text: more !== ""
         });
       } catch (e) {
         await sendMessage(env, chatId, errorMessage(`Error searching contacts: ${errorText(e)}`));

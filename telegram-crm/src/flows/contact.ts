@@ -61,7 +61,10 @@ export const handleContactFlow: FlowHandler = async (
       setStep(session, "awaiting_email");
       await persistSession();
       const prompt = promptWithSkip("What is the email address of the contact? (optional)");
-      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
+      await sendMessage(env, chatId, prompt.text, {
+        reply_markup: prompt.reply_markup,
+        accepts_text: prompt.accepts_text
+      });
       break;
     }
     case "awaiting_email": {
@@ -76,7 +79,10 @@ export const handleContactFlow: FlowHandler = async (
       setStep(session, "awaiting_phone");
       await persistSession();
       const prompt = promptWithSkip("What is the phone number of the contact? (must start with + or 00, optional)");
-      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
+      await sendMessage(env, chatId, prompt.text, {
+        reply_markup: prompt.reply_markup,
+        accepts_text: prompt.accepts_text
+      });
       break;
     }
     case "awaiting_phone": {
@@ -95,7 +101,10 @@ export const handleContactFlow: FlowHandler = async (
       setStep(session, "awaiting_nostr");
       await persistSession();
       const prompt = promptWithSkip("What is the nostr npub of the contact? (optional)");
-      await sendMessage(env, chatId, prompt.text, { reply_markup: prompt.reply_markup });
+      await sendMessage(env, chatId, prompt.text, {
+        reply_markup: prompt.reply_markup,
+        accepts_text: prompt.accepts_text
+      });
       break;
     }
     case "awaiting_nostr": {
@@ -196,7 +205,8 @@ export const handleContactFlow: FlowHandler = async (
               ? ` Showing ${orgs.length} of ${found.length}; type more of the name to narrow it down.`
               : "";
           await sendMessage(env, chatId, `Select an existing organization or create new:${more}`, {
-            reply_markup: { inline_keyboard: keyboard }
+            reply_markup: { inline_keyboard: keyboard },
+            accepts_text: more !== ""
           });
         } else {
           await sendMessage(env, chatId, `No organization found with the name "${org}".`, {
