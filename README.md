@@ -2,11 +2,11 @@
 
 Cloudflare Workers behind the Bitcoin Friesland community CRM: a Telegram bot for the team, the API that owns the database, and a worker that forwards inbound email to Telegram.
 
-| Worker                        | What it does                                                                                                                                                                                                                                                              | Bindings                                                             |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| [crm-api](crm-api/)           | Owns the D1 database `crm`. Exposes its methods over [RPC](https://developers.cloudflare.com/workers/runtime-apis/rpc/) (`CrmApi extends WorkerEntrypoint`), no public HTTP. Writes an `audit_log` row for every change.                                                  | `DB` (D1)                                                            |
-| [telegram-crm](telegram-crm/) | Telegram webhook. Team members add contacts and organizations (`/newcontact`, `/neworg`), log conversations (`/logconversation`) and admins manage the team (`/teammember`, `/invite`). Looks up businesses in OpenStreetMap. Sessions live in a Durable Object per user. | `crmApi` (service → crm-api), `CHATS` (Durable Object `ChatSession`) |
-| [mail-to-tg](mail-to-tg/)     | Email Routing worker. Posts each incoming email to the team's Telegram group. When Telegram is unreachable the email waits in a Durable Object and is retried (after 1 minute, doubling up to every hour) until Telegram takes it.                                        | `OUTBOX` (Durable Object `Outbox`)                                   |
+| Worker                        | What it does                                                                                                                                                                                                                                                                                                                                                                                                             | Bindings                                                                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| [crm-api](crm-api/)           | Owns the D1 database `crm`. Exposes its methods over [RPC](https://developers.cloudflare.com/workers/runtime-apis/rpc/) (`CrmApi extends WorkerEntrypoint`), no public HTTP. Writes an `audit_log` row for every change.                                                                                                                                                                                                 | `DB` (D1)                                                                                                             |
+| [telegram-crm](telegram-crm/) | Telegram webhook. Team members add contacts and organizations (`/newcontact`, `/neworg`), log conversations (`/logconversation`) and admins manage the team (`/teammember`, `/invite`). Looks up businesses in OpenStreetMap. Sessions live in a Durable Object per user. Passes presses of the spam button under emails on to mail-to-tg.                                                                               | `crmApi` (service → crm-api), `mailToTg` (service → mail-to-tg `SpamButtons`), `CHATS` (Durable Object `ChatSession`) |
+| [mail-to-tg](mail-to-tg/)     | Email Routing worker. Posts each incoming email to the team's Telegram group. When Telegram is unreachable the email waits in a Durable Object and is retried (after 1 minute, doubling up to every hour) until Telegram takes it. Workers AI labels likely spam, which is then posted without a notification. A spam button under each email deletes it and blocks the sender; later email from that sender is dropped. | `OUTBOX` (Durable Object `Outbox`), `BLOCKLIST` (Durable Object `Blocklist`), `AI` (Workers AI)                       |
 
 ## Requirements
 
@@ -29,7 +29,7 @@ npm run dev                # wrangler dev on localhost
 
 Format before you commit: `npm run format` in the root (`npm run format:check` is what CI runs).
 
-telegram-crm calls crm-api over a service binding, so its types are generated from both configs: `npm run types` in `telegram-crm/` runs `wrangler types -c wrangler.toml -c ../crm-api/wrangler.toml`.
+telegram-crm calls crm-api over a service binding, so its types are generated from both configs: `npm run types` in `telegram-crm/` runs `wrangler types -c wrangler.toml -c ../crm-api/wrangler.toml`. The `mailToTg` binding is typed by hand in `telegram-crm/src/update.ts` (interface `SpamButtons`).
 
 ## Configuration
 
@@ -52,7 +52,7 @@ The schema lives in [crm-api/migrations/](crm-api/migrations/). Change it by add
 
 Workers Builds deploys a worker when a commit that changes its folder lands on `main`. Pull requests run CI (format check, typecheck, tests) but do not deploy. Remote D1 migrations are applied by hand with `npx wrangler d1 migrations apply crm --remote`, after the code that needs them has been reviewed.
 
-Because telegram-crm calls crm-api over RPC, a change to a crm-api method must be live before the telegram-crm change that uses it.
+Because telegram-crm calls crm-api and mail-to-tg over RPC, a change to a method there must be live before the telegram-crm change that uses it.
 
 ## Contributing
 

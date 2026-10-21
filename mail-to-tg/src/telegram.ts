@@ -9,13 +9,14 @@ export const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, 
 
 interface TelegramResponse {
   ok?: boolean;
+  result?: unknown;
   description?: string;
   parameters?: { retry_after?: number };
 }
 
-// Calls the Bot API and throws unless Telegram confirms with ok: true. Waits out 429s
-// (up to MAX_RETRY_WAIT_SECONDS in total) and retries a 5xx or network error once.
-async function callTelegram(env: Env, method: string, body: string | FormData) {
+// Calls the Bot API and returns its result; throws unless Telegram confirms with ok: true.
+// Waits out 429s (up to MAX_RETRY_WAIT_SECONDS in total) and retries a 5xx or network error once.
+export async function callTelegram(env: Env, method: string, body: string | FormData) {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`;
   const init: RequestInit = { method: "POST", body };
   if (typeof body === "string") init.headers = { "Content-Type": "application/json" };
@@ -35,7 +36,7 @@ async function callTelegram(env: Env, method: string, body: string | FormData) {
     }
 
     const data = (await resp.json().catch(() => ({}))) as TelegramResponse;
-    if (resp.ok && data.ok) return;
+    if (resp.ok && data.ok) return data.result;
 
     const reason = `${resp.status} ${data.description ?? resp.statusText}`;
     if (resp.status === 429) {
@@ -56,30 +57,55 @@ async function callTelegram(env: Env, method: string, body: string | FormData) {
   }
 }
 
-async function sendMessage(env: Env, text: string, first?: boolean) {
-  const html = escapeHtml(text);
-  await callTelegram(
+// The button under the last message of every email (see buttons.ts).
+export const spamKeyboard = (email: number) => ({
+  inline_keyboard: [[{ text: "🚫 Spam", callback_data: `spam:${email}` }]]
+});
+
+// Returns the id of the message Telegram created.
+function messageId(result: unknown) {
+  const id = (result as { message_id?: unknown } | undefined)?.message_id;
+  return typeof id === "number" ? id : undefined;
+}
+
+async function sendMessage(env: Env, send: Send & { kind: "message" }) {
+  const html = escapeHtml(send.text);
+  const result = await callTelegram(
     env,
     "sendMessage",
     JSON.stringify({
       chat_id: env.TELEGRAM_CHAT_ID,
-      text: first ? html.replace("📩 New Email", "📩 <b>New Email</b>") : html,
-      parse_mode: "HTML"
+      text: send.first ? html.replace("📩 New Email", "📩 <b>New Email</b>") : html,
+      parse_mode: "HTML",
+      ...(send.silent ? { disable_notification: true } : {}),
+      ...(send.button && send.email !== undefined ? { reply_markup: spamKeyboard(send.email) } : {})
     })
   );
+  return messageId(result);
 }
 
-async function sendDocument(env: Env, text: string) {
+async function sendDocument(env: Env, send: Send & { kind: "document" }) {
   const form = new FormData();
   form.append("chat_id", String(env.TELEGRAM_CHAT_ID));
-  form.append("document", new File([text], "email.txt", { type: "text/plain;charset=utf-8" }));
-  await callTelegram(env, "sendDocument", form);
+  form.append("document", new File([send.text], "email.txt", { type: "text/plain;charset=utf-8" }));
+  if (send.silent) form.append("disable_notification", "true");
+  if (send.button && send.email !== undefined) form.append("reply_markup", JSON.stringify(spamKeyboard(send.email)));
+  return messageId(await callTelegram(env, "sendDocument", form));
 }
 
-// One Bot API call that carries (part of) an email; plain data, so the outbox can store it.
-export type Send = { kind: "message"; text: string; first?: boolean } | { kind: "document"; text: string };
+/**
+ * One Bot API call that carries (part of) an email; plain data, so the outbox can store it.
+ * silent: sent without a notification (likely spam). email: the id under which the blocklist
+ * remembers the email's messages, so a spam button can delete them all. button: this call
+ * carries the spam button, on the last message of the email.
+ */
+export type Send = ({ kind: "message"; text: string; first?: boolean } | { kind: "document"; text: string }) & {
+  silent?: boolean;
+  email?: number;
+  button?: boolean;
+};
 
+// Returns the id of the message Telegram created, when it says.
 export async function deliver(env: Env, send: Send) {
-  if (send.kind === "document") await sendDocument(env, send.text);
-  else await sendMessage(env, send.text, send.first);
+  return send.kind === "document" ? sendDocument(env, send) : sendMessage(env, send);
 }

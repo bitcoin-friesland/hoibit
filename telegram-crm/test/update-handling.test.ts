@@ -8,6 +8,7 @@ import type { TelegramUpdate } from "../src/types";
 import {
   addAdmin,
   addMember,
+  answerSpamButtons,
   callbackAnswers,
   chatAs,
   groupChat,
@@ -17,6 +18,7 @@ import {
   resetAndStubFetch,
   SECRET,
   sessionOf,
+  spamButtonPresses,
   workerEnv,
   type SentMessage
 } from "./harness";
@@ -414,5 +416,40 @@ describe("webhook handling", () => {
     } finally {
       error.mockRestore();
     }
+  });
+});
+
+describe("spam button", () => {
+  const MAIL_GROUP = -1002557433889;
+
+  it("passes a team member's press to mail-to-tg and shows its answer", async () => {
+    await addAdmin(ADMIN);
+    await addMember(MEMBER);
+    const group = groupChat(MAIL_GROUP);
+    await group.as(ADMIN).text("/newcontact");
+    await group.as(MEMBER).press("spam:7", { messageId: 321 });
+    expect(spamButtonPresses()).toEqual([{ data: "spam:7", chatId: MAIL_GROUP, messageId: 321 }]);
+    expect(lastAnswer().text).toBe("Delete this email and block its sender?");
+    // Not part of any flow: the admin's /newcontact goes on.
+    expect(group.sessionOf(ADMIN)?.mode).toBe("contact");
+    expect(sent).toHaveLength(1);
+  });
+
+  it("does not pass on a press of someone outside the team", async () => {
+    await addAdmin(ADMIN);
+    await groupChat(MAIL_GROUP).as(9999).press("spam:7:yes", { messageId: 321 });
+    expect(spamButtonPresses()).toEqual([]);
+    expect(lastAnswer().text).toBe("You are not authorized to use this bot.");
+  });
+
+  it("answers on the button, not in the group, when mail-to-tg fails", async () => {
+    await addAdmin(ADMIN);
+    answerSpamButtons(async () => {
+      throw new Error("mail-to-tg down");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await groupChat(MAIL_GROUP).as(ADMIN).press("spam:7:yes", { messageId: 321 });
+    expect(lastAnswer().text).toBe("Something went wrong. Please try again later.");
+    expect(sent).toEqual([]);
   });
 });

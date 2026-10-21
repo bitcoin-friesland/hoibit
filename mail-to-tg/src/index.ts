@@ -1,8 +1,12 @@
 import PostalMime, { type Address, type Email } from "postal-mime";
+import { blocklist, remember } from "./blocklist";
+import { spamReason } from "./classify";
 import { htmlToText } from "./html-to-text";
 import { enqueue, retrySoon } from "./outbox";
 import { deliver, sleep, type Send } from "./telegram";
 
+export { Blocklist } from "./blocklist";
+export { SpamButtons } from "./buttons";
 export { Outbox } from "./outbox";
 
 // Telegram counts the 4096 limit after entity parsing, so the escaping below does not count.
@@ -76,8 +80,10 @@ function addressKey(list: Address[] | Address | undefined): string {
     .join(",");
 }
 
-function buildHeader(parsed: Email) {
-  const lines = ["📩 New Email", `👤 From: ${formatAddresses(parsed.from) || "(unknown)"}`];
+function buildHeader(parsed: Email, spam: string | undefined) {
+  const lines = ["📩 New Email"];
+  if (spam) lines.push(`⚠️ Likely spam: ${spam}`);
+  lines.push(`👤 From: ${formatAddresses(parsed.from) || "(unknown)"}`);
   if (parsed.replyTo?.length && addressKey(parsed.replyTo) !== addressKey(parsed.from)) {
     lines.push(`↩️ Reply-To: ${formatAddresses(parsed.replyTo)}`);
   }
@@ -99,10 +105,22 @@ function bodyText(parsed: Email) {
   return "(No content)";
 }
 
-// The Bot API calls that carry an email, in order.
-function plan(parsed: Email): Send[] {
+/**
+ * The Bot API calls that carry an email, in order. spam: why the email is likely spam; it then
+ * goes out without a notification. email: its id in the blocklist; the last call then carries
+ * the spam button.
+ */
+function plan(parsed: Email, spam?: string, email?: number): Send[] {
+  const sends = splitIntoCalls(buildHeader(parsed, spam) + bodyText(parsed));
+  return sends.map((send, i) => ({
+    ...send,
+    ...(spam ? { silent: true } : {}),
+    ...(email !== undefined ? { email, button: i === sends.length - 1 } : {})
+  }));
+}
+
+function splitIntoCalls(full: string): Send[] {
   // Splitting happens before escaping, so no entity is cut in half.
-  const full = buildHeader(parsed) + bodyText(parsed);
   // Telegram refuses a message that is only whitespace.
   const parts = splitText(full, MAX_MESSAGE_LENGTH).filter(part => part.trim());
 
@@ -120,13 +138,25 @@ function plan(parsed: Email): Send[] {
 async function deliverAll(env: Env, sends: Send[]) {
   for (let i = 0; i < sends.length; i++) {
     if (i > 0) await sleep(100);
+    let messageId: number | undefined;
     try {
-      await deliver(env, sends[i]);
+      messageId = await deliver(env, sends[i]);
     } catch (err) {
       return { delivered: i, err };
     }
+    await remember(env, sends[i], messageId);
   }
   return { delivered: sends.length };
+}
+
+// Runs fn; logs a failure and returns otherwise instead.
+async function orElse<T>(fn: () => Promise<T>, otherwise: T, what: string) {
+  try {
+    return await fn();
+  } catch (err) {
+    console.error(what, err);
+    return otherwise;
+  }
 }
 
 // Last resort when the email can be neither read nor stored. No setReject: that bounces the
@@ -141,9 +171,31 @@ async function fallback(message: ForwardableEmailMessage, env: Env, err: unknown
 export default {
   async email(message, env) {
     const receivedAt = new Date();
+    let parsed: Email;
+    try {
+      parsed = await PostalMime.parse(message.raw);
+    } catch (err) {
+      console.error("Could not read the email:", err);
+      return fallback(message, env, err);
+    }
+
+    const sender = parsed.from?.address?.toLowerCase() || message.from?.toLowerCase() || "";
+    const senders = [sender, message.from?.toLowerCase()].filter((a): a is string => Boolean(a));
+    // When the blocklist cannot be reached the email goes out as usual, without a spam button.
+    if (await orElse(() => blocklist(env).isBlocked(senders), false, "Could not check the blocklist:")) {
+      console.log("Dropped an email from a blocked sender");
+      return;
+    }
+    const spam = await spamReason(env, parsed, bodyText(parsed), message.to);
+    const email = await orElse(
+      () => blocklist(env).addEmail(sender),
+      undefined,
+      "Could not add the email to the blocklist:"
+    );
+
     let sends: Send[];
     try {
-      sends = plan(await PostalMime.parse(message.raw));
+      sends = plan(parsed, spam, email);
     } catch (err) {
       console.error("Could not read the email:", err);
       return fallback(message, env, err);

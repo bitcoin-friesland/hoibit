@@ -1,11 +1,13 @@
-import { env as testEnv, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { createExecutionContext, env as testEnv, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import worker from "../src/index";
+import worker, { SpamButtons } from "../src/index";
 
 interface SentMessage {
   chat_id: string;
   text: string;
   parse_mode: string;
+  disable_notification?: boolean;
+  reply_markup?: { inline_keyboard: { text: string; callback_data: string }[][] };
 }
 
 interface SentDocument {
@@ -13,10 +15,22 @@ interface SentDocument {
   name: string;
   type: string;
   text: string;
+  disable_notification?: string;
+  reply_markup?: string;
 }
 
+// What the Workers AI stub answers, and the prompts it got.
+let verdict: () => unknown;
+let prompts: string[];
+const ai = {
+  run: async (_model: string, input: { messages: { content: string }[] }) => {
+    prompts.push(input.messages[1].content);
+    return verdict();
+  }
+} as unknown as Ai;
+
 // TELEGRAM_TOKEN and TELEGRAM_CHAT_ID come from vitest.config.ts.
-const env = testEnv as Env;
+const env = { ...testEnv, AI: ai } as Env;
 // For the last resort: an outbox that cannot be reached.
 const noOutbox = {
   ...env,
@@ -28,13 +42,20 @@ const noOutbox = {
 } as unknown as Env;
 const envWithFallback = { ...noOutbox, FALLBACK_EMAIL: "backup@example.org" } as Env;
 const outbox = () => env.OUTBOX.get(env.OUTBOX.idFromName("outbox"));
+const blocklist = () => env.BLOCKLIST.get(env.BLOCKLIST.idFromName("blocklist"));
 let sent: SentMessage[];
 let documents: SentDocument[];
+// Other Bot API calls, such as the spam button's edits and deletes.
+let other: { method: string; body: Record<string, unknown> }[];
 let calls: number;
+let nextMessageId = 100;
 
-function stubTelegram(respond: () => Response | Promise<Response> = () => Response.json({ ok: true, result: {} })) {
+const created = () => Response.json({ ok: true, result: { message_id: nextMessageId++ } });
+
+function stubTelegram(respond: () => Response | Promise<Response> = created) {
   sent = [];
   documents = [];
+  other = [];
   calls = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input instanceof Request ? input.url : input);
@@ -49,10 +70,12 @@ function stubTelegram(respond: () => Response | Promise<Response> = () => Respon
         chat_id: String(form.get("chat_id")),
         name: file.name,
         type: file.type,
-        text: await file.text()
+        text: await file.text(),
+        ...(form.has("disable_notification") ? { disable_notification: String(form.get("disable_notification")) } : {}),
+        ...(form.has("reply_markup") ? { reply_markup: String(form.get("reply_markup")) } : {})
       });
     } else {
-      throw new Error(`Unexpected Telegram method: ${url}`);
+      other.push({ method: url.slice(url.lastIndexOf("/") + 1), body: JSON.parse(String(init?.body)) });
     }
     return respond();
   });
@@ -71,6 +94,11 @@ function instantTimers() {
 
 beforeEach(async () => {
   stubTelegram();
+  verdict = () => ({ response: { spam: false, reason: "a question from a person" } });
+  prompts = [];
+  await runInDurableObject(blocklist(), async (_instance, state) => {
+    for (const table of ["blocked", "messages", "emails"]) state.storage.sql.exec(`DELETE FROM ${table}`);
+  });
   // Durable Object storage is shared between tests.
   await runInDurableObject(outbox(), async (_instance, state) => {
     state.storage.sql.exec("DELETE FROM sends");
@@ -132,6 +160,7 @@ describe("email handler", () => {
     expect(sent[0]).toEqual({
       chat_id: "-100123",
       parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "🚫 Spam", callback_data: expect.stringMatching(/^spam:\d+$/) }]] },
       text:
         "📩 <b>New Email</b>\n" +
         "👤 From: Alice Example &lt;alice@example.com&gt;\n" +
@@ -511,12 +540,164 @@ describe("outbox", () => {
     stubTelegram();
     const before = Date.now();
     await worker.email(mail(PLAIN, "Second"), env);
-    expect(await alarmAt()).toBeLessThanOrEqual(before + 1000);
+    // The alarm may already have fired and delivered the first email.
+    const at = await alarmAt();
+    if (at === null) expect(await waiting()).toEqual([]);
+    else expect(at).toBeLessThanOrEqual(before + 1000);
   });
 
   it("does not set an alarm when nothing is waiting", async () => {
     await worker.email(mail(PLAIN, "Hello"), env);
     expect(await alarmAt()).toBeNull();
+  });
+});
+
+const COLD_PITCH = [
+  "From: Aushan <aushan@example.net>",
+  "To: someone-else@example.net",
+  "Subject: Re: Low Cost web development",
+  "Content-Type: text/plain; charset=utf-8"
+];
+
+function pitch(headers = COLD_PITCH) {
+  const message = mail(headers, "Would it be okay to send you sample websites & price?");
+  Object.assign(message, { from: "bounce@example.net", to: "mail@hoibit.nl" });
+  return message;
+}
+
+const likelySpam = () => ({ response: { spam: true, reason: "unsolicited web development pitch" } });
+const buttons = () => new SpamButtons(createExecutionContext(), env);
+const spamData = (m: { reply_markup?: string | SentMessage["reply_markup"] }) => {
+  const markup = typeof m.reply_markup === "string" ? JSON.parse(m.reply_markup) : m.reply_markup;
+  return markup.inline_keyboard[0][0].callback_data as string;
+};
+
+describe("spam", () => {
+  it("labels likely spam and sends it without a notification", async () => {
+    verdict = likelySpam;
+    await worker.email(pitch(), env);
+    expect(sent).toHaveLength(1);
+    expect(unescape(sent[0].text)).toMatch(
+      /^📩 New Email\n⚠️ Likely spam: unsolicited web development pitch\n👤 From: Aushan <aushan@example.net>\n/
+    );
+    expect(sent[0].disable_notification).toBe(true);
+  });
+
+  it("tells the model about a Bcc and a fake reply", async () => {
+    await worker.email(pitch(), env);
+    expect(prompts[0]).toContain("Our address mail@hoibit.nl is not in To or Cc");
+    expect(prompts[0]).toContain('The subject starts with "Re:", but the email is not a reply');
+    expect(prompts[0]).toContain("sample websites & price");
+    expect(sent[0].disable_notification).toBeUndefined();
+    expect(sent[0].text).not.toContain("Likely spam");
+  });
+
+  it("sends the email as usual when the model fails or answers nonsense", async () => {
+    for (const answer of [
+      () => {
+        throw new Error("AI down");
+      },
+      () => ({ response: "not json" }),
+      () => ({ response: { verdict: "spam" } })
+    ]) {
+      stubTelegram();
+      verdict = answer;
+      await worker.email(pitch(), env);
+      expect(sent).toHaveLength(1);
+      expect(sent[0].text).not.toContain("Likely spam");
+      expect(sent[0].disable_notification).toBeUndefined();
+    }
+  });
+
+  it("silences every part of a long spam email and puts the button on the last one", async () => {
+    verdict = likelySpam;
+    const body = Array.from({ length: 2500 }, (_, i) => `line ${i} of a very long pitch`).join("\n");
+    await worker.email(mail(PLAIN, body), env);
+    expect(sent[0].disable_notification).toBe(true);
+    expect(sent[0].reply_markup).toBeUndefined();
+    expect(documents[0].disable_notification).toBe("true");
+    expect(spamData(documents[0])).toMatch(/^spam:\d+$/);
+  });
+
+  it("asks for confirmation, then deletes every message and blocks the sender", async () => {
+    const body = Array.from({ length: 600 }, (_, i) => `line ${i}`).join("\n");
+    await worker.email(mail(COLD_PITCH, body), env);
+    expect(sent.length).toBeGreaterThan(1);
+    const ids = sent.map((_, i) => 100 + i);
+    nextMessageId = 100;
+    stubTelegram();
+    await worker.email(mail(COLD_PITCH, body), env);
+    const last = sent.at(-1)!;
+    const data = spamData(last);
+    const lastId = nextMessageId - 1;
+
+    expect(await buttons().press(data, -100123, lastId)).toBe("Delete this email and block its sender?");
+    expect(other[0]).toMatchObject({ method: "editMessageReplyMarkup", body: { message_id: lastId } });
+    expect(await buttons().press(`${data}:no`, -100123, lastId)).toBe("Cancelled.");
+    expect(await buttons().press(`${data}:yes`, -100123, lastId)).toBe(
+      "Deleted. Emails from aushan@example.net are now blocked."
+    );
+    expect(other.at(-1)).toEqual({
+      method: "deleteMessages",
+      body: { chat_id: "-100123", message_ids: ids }
+    });
+    // The button is spent.
+    expect(await buttons().press(`${data}:yes`, -100123, lastId)).toBe("This button is no longer active.");
+
+    stubTelegram();
+    await worker.email(pitch(), env);
+    expect(calls).toBe(0);
+    expect(prompts).toHaveLength(2);
+  });
+
+  it("blocks the From address, not the envelope sender", async () => {
+    await worker.email(pitch(), env);
+    const id = nextMessageId - 1;
+    await buttons().press(`${spamData(sent[0])}:yes`, -100123, id);
+    stubTelegram();
+    // Same envelope sender (bounce@example.net), another From: only the From address was blocked.
+    await worker.email(pitch(["From: Other Name <other@example.org>", ...COLD_PITCH.slice(1)]), env);
+    expect(calls).toBe(1);
+  });
+
+  it("refuses buttons from another chat, another message or with unknown data", async () => {
+    await worker.email(pitch(), env);
+    const data = spamData(sent[0]);
+    const id = nextMessageId - 1;
+    expect(await buttons().press(`${data}:yes`, -100999, id)).toBe("This button is no longer active.");
+    expect(await buttons().press(`${data}:yes`, -100123, id + 1)).toBe("This button is no longer active.");
+    expect(await buttons().press("spam:abc", -100123, id)).toBe("This button is no longer active.");
+    expect(other).toEqual([]);
+  });
+
+  it("still blocks the sender when Telegram no longer lets the bot delete the email", async () => {
+    await worker.email(pitch(), env);
+    const data = spamData(sent[0]);
+    const id = nextMessageId - 1;
+    stubTelegram(() => Response.json({ ok: false, description: "Bad Request: message can't be deleted" }));
+    expect(await buttons().press(`${data}:yes`, -100123, id)).toBe(
+      "Emails from aushan@example.net are now blocked. Telegram did not let the bot delete the email; delete it by hand."
+    );
+    stubTelegram();
+    await worker.email(pitch(), env);
+    expect(calls).toBe(0);
+  });
+
+  it("keeps the label, the silence and the button of an email that waited in the outbox", async () => {
+    instantTimers();
+    verdict = likelySpam;
+    stubTelegram(telegramDown);
+    await worker.email(pitch(), env);
+
+    stubTelegram();
+    await runDurableObjectAlarm(outbox());
+    expect(sent.map(m => m.disable_notification)).toEqual([true, true]);
+    expect(sent[0].reply_markup).toBeUndefined();
+    expect(unescape(sent[1].text)).toContain("⚠️ Likely spam");
+    const ids = [nextMessageId - 2, nextMessageId - 1];
+    await buttons().press(`${spamData(sent[1])}:yes`, -100123, ids[1]);
+    // The delay note goes too.
+    expect(other.at(-1)).toMatchObject({ method: "deleteMessages", body: { message_ids: ids } });
   });
 });
 

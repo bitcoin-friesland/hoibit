@@ -28,6 +28,12 @@ const EXPIRED_BUTTON = "This button has expired. Start again with /help.";
 const NOT_AUTHORIZED_BUTTON = "You are not authorized to use this bot.";
 const ONLY_ADMINS = "Only admins can manage team members.";
 
+// mail-to-tg's SpamButtons entrypoint (mail-to-tg/src/buttons.ts). Its types are not imported:
+// they would type-check mail-to-tg's code against this Worker's Env.
+interface SpamButtons {
+  press(data: string, chatId: number, messageId: number): Promise<string>;
+}
+
 interface TelegramResponse<T> {
   ok: boolean;
   result?: T;
@@ -245,6 +251,16 @@ async function handleButton(
       notice = NOT_AUTHORIZED_BUTTON;
       store.deleteSession(userId);
       return reply("Forbidden");
+    }
+    // The spam button under an email that mail-to-tg posted; it belongs to no session.
+    if (callback.data?.startsWith("spam:")) {
+      notice = await (env.mailToTg as unknown as SpamButtons)
+        .press(callback.data, chatId, callback.message.message_id ?? 0)
+        .catch(e => {
+          console.error("Spam button failed", e);
+          return SOMETHING_WENT_WRONG;
+        });
+      return reply("OK");
     }
     const session = store.getSession(userId);
     if (!session) {

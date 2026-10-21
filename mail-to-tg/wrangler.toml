@@ -2,7 +2,8 @@ name = "mail-to-tg"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
 
-# Matches current deployed settings. Only the email handler is used.
+# Matches current deployed settings. The email handler takes the mail; telegram-crm calls the
+# SpamButtons entrypoint over a service binding when someone presses a spam button.
 workers_dev = true
 preview_urls = true
 
@@ -14,9 +15,22 @@ TELEGRAM_CHAT_ID = "-1002557433889"
 name = "OUTBOX"
 class_name = "Outbox"
 
+# Senders marked as spam, and the Telegram messages of recent emails (src/blocklist.ts).
+[[durable_objects.bindings]]
+name = "BLOCKLIST"
+class_name = "Blocklist"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Outbox"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Blocklist"]
+
+# Workers AI decides whether an email is likely spam (src/classify.ts).
+[ai]
+binding = "AI"
 
 # Keep logs in Workers Logs (free: 200k events a day, 3 days retention).
 [observability]

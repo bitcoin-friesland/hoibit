@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { remember } from "./blocklist";
 import { deliver, sleep, type Send } from "./telegram";
 
 // First retry after a minute, then twice as long each time, up to an hour. It never gives up:
@@ -31,7 +32,17 @@ interface Row extends Record<string, SqlStorageValue> {
   first: number;
   text: string;
   continued: number;
+  silent: number;
+  email: number | null;
+  button: number;
 }
+
+// Columns added after v1; a table created before them gets them on first use.
+const LATER_COLUMNS = {
+  silent: "INTEGER NOT NULL DEFAULT 0",
+  email: "INTEGER",
+  button: "INTEGER NOT NULL DEFAULT 0"
+};
 
 /**
  * The Bot API calls of emails Telegram did not take, oldest first. An alarm retries them in
@@ -49,6 +60,15 @@ export class Outbox extends DurableObject<Env> {
       text TEXT NOT NULL,
       continued INTEGER NOT NULL
     )`);
+    const columns = new Set(
+      ctx.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(sends)")
+        .toArray()
+        .map(c => c.name)
+    );
+    for (const [name, type] of Object.entries(LATER_COLUMNS)) {
+      if (!columns.has(name)) ctx.storage.sql.exec(`ALTER TABLE sends ADD COLUMN ${name} ${type}`);
+    }
   }
 
   async add(sends: Send[]) {
@@ -57,11 +77,14 @@ export class Outbox extends DurableObject<Env> {
         const parts = chunks(send.text);
         parts.forEach((text, i) =>
           this.ctx.storage.sql.exec(
-            "INSERT INTO sends (kind, first, text, continued) VALUES (?, ?, ?, ?)",
+            "INSERT INTO sends (kind, first, text, continued, silent, email, button) VALUES (?, ?, ?, ?, ?, ?, ?)",
             send.kind,
             send.kind === "message" && send.first ? 1 : 0,
             text,
-            i < parts.length - 1 ? 1 : 0
+            i < parts.length - 1 ? 1 : 0,
+            send.silent ? 1 : 0,
+            send.email ?? null,
+            send.button ? 1 : 0
           )
         );
       }
@@ -84,17 +107,25 @@ export class Outbox extends DurableObject<Env> {
     }
     if (rows.length === 0) return undefined;
     const text = rows.map(row => row.text).join("");
+    const [row] = rows;
+    const options = {
+      ...(row.silent ? { silent: true } : {}),
+      ...(row.email !== null ? { email: row.email, button: row.button === 1 } : {})
+    };
     const send: Send =
-      rows[0].kind === "document" ? { kind: "document", text } : { kind: "message", text, first: rows[0].first === 1 };
+      row.kind === "document"
+        ? { kind: "document", text, ...options }
+        : { kind: "message", text, first: row.first === 1, ...options };
     return { ids: rows.map(row => row.id), send };
   }
 
   async alarm() {
     try {
       for (let entry = this.next(); entry; entry = this.next()) {
-        await deliver(this.env, entry.send);
+        const messageId = await deliver(this.env, entry.send);
         this.ctx.storage.sql.exec("DELETE FROM sends WHERE id BETWEEN ? AND ?", entry.ids[0], entry.ids.at(-1)!);
         this.ctx.storage.kv.delete("failures");
+        await remember(this.env, entry.send, messageId);
         await sleep(100);
       }
     } catch (err) {
@@ -114,7 +145,12 @@ export async function enqueue(env: Env, receivedAt: Date, sends: Send[], partial
   const note = partial
     ? `⏳ The rest of an email that arrived ${formatTime(receivedAt)}; Telegram failed halfway through it.`
     : `⏳ Delayed: the next email arrived ${formatTime(receivedAt)}, when Telegram could not take it.`;
-  await outbox(env).add([{ kind: "message", text: note }, ...sends]);
+  // The note belongs to the email: it is as silent, and a spam button deletes it too.
+  const { silent, email } = sends[0] ?? {};
+  await outbox(env).add([
+    { kind: "message", text: note, ...(silent ? { silent } : {}), ...(email !== undefined ? { email } : {}) },
+    ...sends
+  ]);
 }
 
 export async function retrySoon(env: Env) {
