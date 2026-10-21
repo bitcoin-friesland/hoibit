@@ -45,6 +45,8 @@ async function ownCommunityId(env: Env, session: Session) {
   }
 }
 
+const NAME_PROMPT = "What is the contact name?";
+
 export const handleContactFlow: FlowHandler = async (
   sendMessage,
   env,
@@ -55,6 +57,25 @@ export const handleContactFlow: FlowHandler = async (
   removeSession = async () => {}
 ) => {
   switch (session.step) {
+    case "from_email": {
+      // ➕ Contact under an email: the sender's address is in session.email, their name (from the
+      // email's From) in pending_contact_name. A name that is no valid contact name is asked for.
+      const name = session.pending_contact_name?.trim();
+      delete session.pending_contact_name;
+      setStep(session, "awaiting_name");
+      await sendMessage(
+        env,
+        chatId,
+        `➕ New contact from email: ${name ? `${name} <${session.email}>` : session.email}`
+      );
+      if (isValidName(name)) {
+        await handleContactFlow(sendMessage, env, chatId, name, session, persistSession, removeSession);
+        return;
+      }
+      await persistSession();
+      await sendMessage(env, chatId, NAME_PROMPT);
+      break;
+    }
     case "awaiting_name": {
       const name = text && text.trim();
       if (!isValidName(name)) {

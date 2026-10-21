@@ -6,6 +6,8 @@ const KEEP_EMAILS_MS = 90 * 24 * 3_600_000;
 
 export interface EmailRecord {
   sender: string;
+  // The sender's display name, "" without one.
+  name: string;
   received: number;
   messages: number[];
 }
@@ -28,6 +30,15 @@ export class Blocklist extends DurableObject<Env> {
       sender TEXT NOT NULL,
       received INTEGER NOT NULL
     )`);
+    // Added for the ➕ Contact button; emails remembered before it have no name.
+    if (
+      !ctx.storage.sql
+        .exec("PRAGMA table_info(emails)")
+        .toArray()
+        .some(c => c.name === "name")
+    ) {
+      ctx.storage.sql.exec("ALTER TABLE emails ADD COLUMN name TEXT NOT NULL DEFAULT ''");
+    }
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS messages (
       email INTEGER NOT NULL,
       message_id INTEGER NOT NULL,
@@ -46,7 +57,7 @@ export class Blocklist extends DurableObject<Env> {
   }
 
   // Starts remembering an email; returns its id. Forgets emails older than KEEP_EMAILS_MS.
-  addEmail(sender: string) {
+  addEmail(sender: string, name = "") {
     const now = Date.now();
     return this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
@@ -55,7 +66,12 @@ export class Blocklist extends DurableObject<Env> {
       );
       this.ctx.storage.sql.exec("DELETE FROM emails WHERE received < ?", now - KEEP_EMAILS_MS);
       return this.ctx.storage.sql
-        .exec<{ id: number }>("INSERT INTO emails (sender, received) VALUES (?, ?) RETURNING id", sender, now)
+        .exec<{ id: number }>(
+          "INSERT INTO emails (sender, name, received) VALUES (?, ?, ?) RETURNING id",
+          sender,
+          name,
+          now
+        )
         .one().id;
     });
   }
@@ -67,14 +83,17 @@ export class Blocklist extends DurableObject<Env> {
   // Named find, not email: a Durable Object method called email would be its email handler.
   find(id: number): EmailRecord | undefined {
     const row = this.ctx.storage.sql
-      .exec<{ sender: string; received: number }>("SELECT sender, received FROM emails WHERE id = ?", id)
+      .exec<{ sender: string; name: string; received: number }>(
+        "SELECT sender, name, received FROM emails WHERE id = ?",
+        id
+      )
       .toArray()[0];
     if (!row) return undefined;
     const messages = this.ctx.storage.sql
       .exec<{ message_id: number }>("SELECT message_id FROM messages WHERE email = ? ORDER BY message_id", id)
       .toArray()
       .map(m => m.message_id);
-    return { sender: row.sender, received: row.received, messages };
+    return { sender: row.sender, name: row.name, received: row.received, messages };
   }
 
   forget(id: number) {

@@ -1,13 +1,14 @@
 import { createExecutionContext, env as testEnv, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker, { SpamButtons } from "../src/index";
+import { forgetBotUsername } from "../src/telegram";
 
 interface SentMessage {
   chat_id: string;
   text: string;
   parse_mode: string;
   disable_notification?: boolean;
-  reply_markup?: { inline_keyboard: { text: string; callback_data: string }[][] };
+  reply_markup?: { inline_keyboard: { text: string; callback_data?: string; url?: string }[][] };
 }
 
 interface SentDocument {
@@ -51,6 +52,8 @@ let calls: number;
 let nextMessageId = 100;
 
 const created = () => Response.json({ ok: true, result: { message_id: nextMessageId++ } });
+// Whether getMe tells the bot's username; it is answered apart from the other calls.
+let knowsUsername = true;
 
 function stubTelegram(respond: () => Response | Promise<Response> = created) {
   sent = [];
@@ -60,6 +63,11 @@ function stubTelegram(respond: () => Response | Promise<Response> = created) {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input instanceof Request ? input.url : input);
     if (!url.startsWith("https://api.telegram.org/bottest-token/")) throw new Error(`Unexpected fetch: ${url}`);
+    if (url.endsWith("/getMe")) {
+      return knowsUsername
+        ? Response.json({ ok: true, result: { id: 1, is_bot: true, username: "HoiBitBot" } })
+        : Response.json({ ok: false, description: "Unauthorized" }, { status: 401 });
+    }
     calls++;
     if (url.endsWith("/sendMessage")) {
       sent.push(JSON.parse(String(init?.body)));
@@ -93,6 +101,8 @@ function instantTimers() {
 }
 
 beforeEach(async () => {
+  knowsUsername = true;
+  forgetBotUsername();
   stubTelegram();
   verdict = () => ({ response: { spam: false, reason: "a question from a person" } });
   prompts = [];
@@ -160,7 +170,14 @@ describe("email handler", () => {
     expect(sent[0]).toEqual({
       chat_id: "-100123",
       parse_mode: "HTML",
-      reply_markup: { inline_keyboard: [[{ text: "🚫 Spam", callback_data: expect.stringMatching(/^spam:\d+$/) }]] },
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "🚫 Spam", callback_data: expect.stringMatching(/^spam:\d+$/) },
+            { text: "➕ Contact", url: expect.stringMatching(/^https:\/\/t\.me\/HoiBitBot\?start=mc_\d+$/) }
+          ]
+        ]
+      },
       text:
         "📩 <b>New Email</b>\n" +
         "👤 From: Alice Example &lt;alice@example.com&gt;\n" +
@@ -658,6 +675,28 @@ describe("spam", () => {
     // Same envelope sender (bounce@example.net), another From: only the From address was blocked.
     await worker.email(pitch(["From: Other Name <other@example.org>", ...COLD_PITCH.slice(1)]), env);
     expect(calls).toBe(1);
+  });
+
+  it("offers to save the sender as a contact through the bot's private chat", async () => {
+    await worker.email(pitch(), env);
+    const id = Number(spamData(sent[0]).slice("spam:".length));
+    expect(sent[0].reply_markup!.inline_keyboard[0][1]).toEqual({
+      text: "➕ Contact",
+      url: `https://t.me/HoiBitBot?start=mc_${id}`
+    });
+    expect(await buttons().sender(id)).toEqual({ address: "aushan@example.net", name: "Aushan" });
+    expect(await buttons().sender(id + 1)).toBeUndefined();
+    // Cancelling the spam question brings both buttons back.
+    const messageId = nextMessageId - 1;
+    await buttons().press(`spam:${id}`, -100123, messageId);
+    await buttons().press(`spam:${id}:no`, -100123, messageId);
+    expect(other.at(-1)?.body.reply_markup).toEqual(sent[0].reply_markup);
+  });
+
+  it("leaves out the contact button while the bot's username is unknown", async () => {
+    knowsUsername = false;
+    await worker.email(pitch(), env);
+    expect(sent[0].reply_markup!.inline_keyboard).toEqual([[{ text: "🚫 Spam", callback_data: spamData(sent[0]) }]]);
   });
 
   it("refuses buttons from another chat, another message or with unknown data", async () => {

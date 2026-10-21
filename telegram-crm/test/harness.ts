@@ -18,11 +18,14 @@ const crmApi = new CrmApi(createExecutionContext(), { DB: env.DB });
 type SpamAnswer = string | { text: string; alert?: boolean };
 let spamPresses: { data: string; chatId: number; messageId: number }[] = [];
 let spamAnswer: () => Promise<SpamAnswer> = async () => "Delete this email and block its sender?";
+// The senders of emails, by email id, for the ➕ Contact button.
+let emailSenders = new Map<number, { address: string; name: string }>();
 const mailToTg = {
   press: async (data: string, chatId: number, messageId: number) => {
     spamPresses.push({ data, chatId, messageId });
     return spamAnswer();
-  }
+  },
+  sender: async (email: number) => emailSenders.get(email)
 };
 export const workerEnv = {
   TELEGRAM_TOKEN: "test-token",
@@ -34,6 +37,11 @@ export const workerEnv = {
 // The spam button presses passed on to mail-to-tg in the current test.
 export function spamButtonPresses() {
   return spamPresses;
+}
+
+// Lets mail-to-tg know the sender of email, until the next reset.
+export function emailFrom(email: number, sender: { address: string; name: string }) {
+  emailSenders.set(email, sender);
 }
 
 // What mail-to-tg answers a spam button press with, until the next reset.
@@ -120,6 +128,7 @@ export async function resetAndStubFetch({ nominatim = [] as object[] } = {}): Pr
   forgetCommandMenus();
   lastDelivered = undefined;
   spamPresses = [];
+  emailSenders = new Map();
   spamAnswer = async () => "Delete this email and block its sender?";
 
   const sent: SentMessage[] = [];
