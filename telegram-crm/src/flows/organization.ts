@@ -21,8 +21,13 @@ import { callTelegram } from "../helpers/telegram";
 import type { ChatId, InlineKeyboardButton, SendMessage, SendOptions, Session } from "../types";
 
 // The statuses as organization_statuses has them; the codes are the buttons' callback_data.
+// In the order of the team's funnel, which is the order the bot offers them in.
 export const ORG_STATUSES: Record<string, { id: number; label: string }> = {
+  "to-visit": { id: 5, label: "To visit" },
+  "talked-to-staff": { id: 6, label: "Talked to staff, not owner" },
   "btc-curious": { id: 1, label: "Curious about Bitcoin" },
+  hesitant: { id: 7, label: "Hesitant" },
+  "interested-later": { id: 8, label: "Interested later" },
   "accepts-bitcoin": { id: 2, label: "Accepts Bitcoin" },
   "not-interested": { id: 3, label: "Not Interested" },
   "stopped-accepting": { id: 4, label: "Stopped Accepting Bitcoin" }
@@ -139,7 +144,9 @@ async function save(
         location_osm_id: osmId,
         website: session.organization_website || null,
         nostr_npub: session.organization_nostr_npub || null,
-        community_ids: communities.map(c => c.id)
+        community_ids: communities.map(c => c.id),
+        // Who adds an organization handles it, until someone changes that on its card.
+        team_member_ids: session.created_by ? [session.created_by] : []
       }
     : undefined;
   const details = [

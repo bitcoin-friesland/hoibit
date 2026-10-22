@@ -1,10 +1,13 @@
 /**
  * The card of a saved contact or organization: its details, status and most recent conversations.
  * Its buttons belong to no session and work on old cards too, like log:<id>: show:c:<id> and
- * show:o:<id> open a card, edit:c:<id> and edit:o:<id> start editing one (flows/edit.ts), and
- * status:<id> changes an organization's status (flows/status.ts).
+ * show:o:<id> open a card, edit:c:<id> and edit:o:<id> start editing one (flows/edit.ts),
+ * status:<id> changes an organization's status (flows/status.ts), fu:<id> its follow-up day
+ * (flows/followup.ts), and log:o:<id> logs a conversation with the organization itself.
  */
 import type { ConversationSummary } from "../../../crm-api/src/types";
+import { followUpLabel } from "./day";
+import { followUpButton } from "../flows/followup";
 import { statusButton } from "../flows/status";
 import type { InlineKeyboardButton, SendOptions } from "../types";
 
@@ -17,6 +20,8 @@ export interface RecordRef {
 const LINKED_MAX = 5;
 // Longer notes are cut, so five conversations keep the card short.
 const NOTE_MAX_LENGTH = 120;
+// The organization's notes shown on its card, at most.
+const NOTES_MAX = 3;
 
 export const recordData = (action: "show" | "edit", ref: RecordRef) =>
   `${action}:${ref.kind === "contact" ? "c" : "o"}:${ref.id}`;
@@ -80,16 +85,24 @@ export async function recordCard(
   const org = await env.crmApi.organizationDetails(ref.id);
   if (!org) return undefined;
   buttons[0].push(statusButton(org.id));
+  buttons.push([{ text: "💬 Log conversation", callback_data: `log:o:${org.id}` }, followUpButton(org.id)]);
   const lines = [`🏢 ${org.name}`, `🏷️ ${org.status_label ?? "No status"}`];
+  if (org.category) lines.push(`🏪 ${org.category}`);
+  if (org.address) lines.push(`🏠 ${org.address}`);
+  if (org.phone) lines.push(`📞 ${org.phone}`);
+  if (org.email) lines.push(`📧 ${org.email}`);
   if (org.communities.length > 0) lines.push(`👥 ${org.communities.join(", ")}`);
   if (org.website) lines.push(`🌐 ${org.website}`);
   if (org.nostr_npub) lines.push(`🟣 ${org.nostr_npub}`);
   if (org.location_osm_id) lines.push(`📍 https://www.openstreetmap.org/${org.location_osm_id}`);
-  lines.push(
-    org.contacts.length > 0 ? `👤 ${org.contacts.map(c => c.name).join(", ")}` : "👤 No contacts yet",
-    "",
-    ...conversationLines(org.conversations, true)
-  );
+  lines.push(`🤝 ${org.handled_by.map(h => h.name ?? "?").join(", ") || "Nobody handles it yet"}`);
+  if (org.follow_up_on) lines.push(`⏰ Follow up: ${followUpLabel(org.follow_up_on)}`);
+  lines.push(org.contacts.length > 0 ? `👤 ${org.contacts.map(c => c.name).join(", ")}` : "👤 No contacts yet");
+  if (org.notes.length > 0) {
+    lines.push("", "📝 Notes:", ...org.notes.slice(-NOTES_MAX).map(n => `• ${clip(n, NOTE_MAX_LENGTH)}`));
+    if (org.notes.length > NOTES_MAX) lines.push(`…and ${org.notes.length - NOTES_MAX} older.`);
+  }
+  lines.push("", ...conversationLines(org.conversations, true));
   for (const contact of org.contacts.slice(0, LINKED_MAX)) {
     buttons.push([
       { text: `👤 ${contact.name}`, callback_data: recordData("show", { kind: "contact", id: contact.id }) }

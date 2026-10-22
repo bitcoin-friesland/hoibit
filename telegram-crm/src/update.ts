@@ -11,6 +11,14 @@ import { errorMessage, isErrorMessage } from "./helpers/messaging";
 import { parseRecordData, recordCard } from "./helpers/record";
 import { parseStatusData, setStatus, statusQuestion } from "./flows/status";
 import {
+  chosenDay,
+  followUpList,
+  followUpQuestion,
+  handleFollowUpFlow,
+  parseFollowUpData,
+  setFollowUp
+} from "./flows/followup";
+import {
   botUsername,
   callTelegram,
   clearKeyboard,
@@ -42,7 +50,8 @@ const FLOWS: Record<NonNullable<Session["mode"]>, FlowHandler> = {
   teammember: handleTeamMemberFlow,
   find: handleFindFlow,
   edit: handleEditFlow,
-  me: handleMeFlow
+  me: handleMeFlow,
+  followup: handleFollowUpFlow
 };
 
 const SOMETHING_WENT_WRONG = "Something went wrong. Please try again later.";
@@ -83,7 +92,8 @@ const FLOW_COMMANDS: Record<NonNullable<Session["mode"]>, string> = {
   teammember: "/teammember",
   find: "/find",
   edit: "edit",
-  me: "/me"
+  me: "/me",
+  followup: "follow-up"
 };
 
 const CANCEL_BUTTON = { text: "✖️ Cancel", callback_data: "cancel" };
@@ -425,6 +435,18 @@ async function startCommandFlow(env: Env, store: SessionStore, actor: Actor, com
     case "me":
       await startFlow(env, store, actor, { step: "me_start", mode: "me", ...owner });
       return true;
+    case "followups": {
+      let list;
+      try {
+        list = await followUpList(env, actor.member.id);
+      } catch (e) {
+        console.error("Loading the follow-ups failed", e);
+        await sendMessage(env, actor.chatId, errorMessage("Loading the follow-ups failed. Please try again."));
+        return true;
+      }
+      await sendMessage(env, actor.chatId, list.text, list.options);
+      return true;
+    }
     case "blocked": {
       if (actor.member.is_admin !== 1) {
         await sendMessage(env, actor.chatId, ONLY_ADMINS_BLOCKED);
@@ -512,6 +534,18 @@ async function handleButton(
       if (!(await startCommandFlow(env, store, actor, data.slice("menu:".length)))) notice = { text: STALE_BUTTON };
       return reply("OK");
     }
+    // 💬 Log conversation on an organization's card: a conversation with the organization itself.
+    const loggedOrg = /^log:o:(\d+)$/.exec(data);
+    if (loggedOrg) {
+      await startFlow(env, store, actor, {
+        step: "log_organization",
+        mode: "conversation",
+        organization_id: Number(loggedOrg[1]),
+        created_by: member.id,
+        telegram_id: userId
+      });
+      return reply("OK");
+    }
     // "Log conversation with …" under a saved contact: the conversation steps for that contact.
     if (data.startsWith("log:")) {
       const contactId = Number(data.slice("log:".length));
@@ -556,6 +590,50 @@ async function handleButton(
         );
       }
       notice = { text: "Status saved." };
+      return reply("OK");
+    }
+    // ⏰ Follow-up: asks for the day, then sets it (flows/followup.ts); Other date asks to type it.
+    const followUp = parseFollowUpData(data);
+    if (followUp) {
+      const { organizationId, choice } = followUp;
+      if (choice === undefined) {
+        const question = await followUpQuestion(env, organizationId);
+        if (question) await sendMessage(env, chatId, question.text, question.options);
+        else notice = { text: "This no longer exists." };
+        return reply("OK");
+      }
+      const day = chosenDay(choice);
+      if (day === undefined) {
+        const org = await env.crmApi.organizationDetails(organizationId, 0);
+        if (!org) {
+          notice = { text: "This no longer exists." };
+          return reply("OK");
+        }
+        await startFlow(env, store, actor, {
+          step: "follow_up_start",
+          mode: "followup",
+          organization_id: org.id,
+          organization: org.name,
+          created_by: member.id,
+          telegram_id: userId
+        });
+        return reply("OK");
+      }
+      const answer = await setFollowUp(env, organizationId, day, member.id);
+      if (!answer) {
+        notice = { text: "Saving the follow-up failed. Please try again.", alert: true };
+        return reply("OK");
+      }
+      const { message } = callback;
+      if (message.message_id !== undefined) {
+        await markAnswered(
+          env,
+          chatId,
+          { messageId: message.message_id, text: message.text, entities: message.entities },
+          answer
+        );
+      }
+      notice = { text: "Follow-up saved." };
       return reply("OK");
     }
     const edited = parseRecordData(data, "edit");
