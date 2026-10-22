@@ -75,6 +75,7 @@ describe("/find", () => {
     expect(lastButtons()).toEqual([
       { text: "✏️ Edit", callback_data: `edit:c:${annaId}` },
       { text: "💬 Log conversation", callback_data: `log:${annaId}` },
+      { text: "📜 Conversations", callback_data: `hist:c:${annaId}:0` },
       { text: "🏢 Cafe Satoshi", callback_data: `show:o:${orgId}` }
     ]);
   });
@@ -91,6 +92,7 @@ describe("/find", () => {
       { text: "📊 Status", callback_data: `status:${orgId}` },
       { text: "💬 Log conversation", callback_data: `log:o:${orgId}` },
       { text: "⏰ Follow-up", callback_data: `fu:${orgId}` },
+      { text: "📜 Conversations", callback_data: `hist:o:${orgId}:0` },
       { text: "👤 Anna", callback_data: `show:c:${annaId}` }
     ]);
     expect(sessionOf(ADMIN)).toBeUndefined();
