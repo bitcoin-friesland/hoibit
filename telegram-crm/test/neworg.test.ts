@@ -77,7 +77,11 @@ describe("/neworg", () => {
     await chat.text("Cafe Satoshi");
     expect(lastText()).toBe('What is the Bitcoin status of "Cafe Satoshi"?');
     expect(lastKeyboard().map(row => row[0].text)).toEqual([
+      "To visit",
+      "Talked to staff, not owner",
       "Curious about Bitcoin",
+      "Hesitant",
+      "Interested later",
       "Accepts Bitcoin",
       "Not Interested",
       "Stopped Accepting Bitcoin"
@@ -143,6 +147,11 @@ describe("/neworg", () => {
     ).all();
     expect(audit.results).toEqual([{ action: "insert", record_id: String(org!.id), performed_by: adminId }]);
     expect(await count("contacts")).toBe(0);
+    // Who adds an organization handles it.
+    const handlers = await env.DB.prepare(
+      "SELECT organization_id, team_member_id FROM organization_team_members"
+    ).all();
+    expect(handlers.results).toEqual([{ organization_id: org!.id, team_member_id: adminId }]);
   });
 
   it("saves right away without communities or OpenStreetMap results", async () => {

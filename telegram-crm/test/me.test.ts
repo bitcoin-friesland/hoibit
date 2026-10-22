@@ -87,7 +87,7 @@ describe("/me", () => {
     const chat = chatAs(MEMBER);
     await chat.text("/help");
     expect(lastText()).toContain("/me - Your name and communities");
-    expect(lastButtons()).toContain("🙋 Me");
+    expect(lastButtons()).toContain("⏰ Follow-ups | 🙋 Me");
     await chat.press("menu:me");
     expect(lastText()).toBe("🙋 Erin\n👥 No communities");
   });

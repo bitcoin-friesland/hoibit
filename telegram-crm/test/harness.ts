@@ -66,6 +66,8 @@ const DATA_TABLES = [
   "audit_log",
   "conversations",
   "organization_communities",
+  "organization_team_members",
+  "organization_notes",
   "contact_phones",
   "contact_emails",
   "contacts",

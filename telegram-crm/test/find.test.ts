@@ -31,7 +31,13 @@ const lastButtons = () => buttonsOf(sent[sent.length - 1]);
 
 // Cafe Satoshi (accepts Bitcoin) with Anna, who has an email address and one conversation.
 async function seed(adminId: number) {
-  const org = await crm.newOrg({ name: "Cafe Satoshi", status: 2, website: "satoshi.cafe", created_by: adminId });
+  const org = await crm.newOrg({
+    name: "Cafe Satoshi",
+    status: 2,
+    website: "satoshi.cafe",
+    created_by: adminId,
+    team_member_ids: [adminId]
+  });
   if (!org.ok) throw new Error(org.error);
   const anna = await crm.newContact({
     name: "Anna",
@@ -78,11 +84,13 @@ describe("/find", () => {
     const { orgId, annaId } = await seed(adminId);
     await chatAs(ADMIN).text("/find satoshi");
     expect(lastText()).toMatch(
-      /^🏢 Cafe Satoshi\n🏷️ Accepts Bitcoin\n🌐 satoshi\.cafe\n👤 Anna\n\nRecent conversations:\n• \d{4}-\d\d-\d\d · Anna · Phone \(Admin\): Wants a terminal$/u
+      /^🏢 Cafe Satoshi\n🏷️ Accepts Bitcoin\n🌐 satoshi\.cafe\n🤝 Admin\n👤 Anna\n\nRecent conversations:\n• \d{4}-\d\d-\d\d · Anna · Phone \(Admin\): Wants a terminal$/u
     );
     expect(lastButtons()).toEqual([
       { text: "✏️ Edit", callback_data: `edit:o:${orgId}` },
       { text: "📊 Status", callback_data: `status:${orgId}` },
+      { text: "💬 Log conversation", callback_data: `log:o:${orgId}` },
+      { text: "⏰ Follow-up", callback_data: `fu:${orgId}` },
       { text: "👤 Anna", callback_data: `show:c:${annaId}` }
     ]);
     expect(sessionOf(ADMIN)).toBeUndefined();
@@ -173,7 +181,7 @@ describe("editing from a card", () => {
     const chat = chatAs(ADMIN);
     await chat.press(`edit:o:${orgId}`);
     expect(lastText()).toContain(
-      "✏️ Edit organization\n\n🏢 Name: Cafe Satoshi\n🌐 Website: satoshi.cafe\n🟣 Nostr: —"
+      "✏️ Edit organization\n\n🏢 Name: Cafe Satoshi\n🏪 Kind of business: —\n🏠 Address: —\n📞 Phone: —\n📧 Email: —\n🌐 Website: satoshi.cafe\n🟣 Nostr: —"
     );
     await chat.press("card:organization");
     await chat.text("Café Satoshi");
@@ -244,7 +252,7 @@ describe("editing from a card", () => {
       .run();
     const chat = chatAs(ADMIN);
     await chat.press(`edit:o:${orgId}`);
-    expect(lastText()).toContain("🟣 Nostr: —\n👥 Communities: Hard Money Cafe\n📍 Location: —");
+    expect(lastText()).toContain("👥 Communities: Hard Money Cafe\n🤝 Handled by: Admin\n📍 Location: —");
 
     await chat.press("card:communities");
     expect(lastText()).toBe("Select Bitcoin communities for this organization:");
