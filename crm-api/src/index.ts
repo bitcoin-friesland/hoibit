@@ -9,6 +9,9 @@ import type {
   CreateInviteInput,
   DeleteTeamMemberInput,
   FirstUserInput,
+  FollowUp,
+  FollowUpSearch,
+  Handler,
   Invite,
   LogConversationInput,
   Lookup,
@@ -82,14 +85,18 @@ const TELEGRAM_USERNAME = /^[A-Za-z0-9_]{1,32}$/;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// Whether day is a real calendar day ("YYYY-MM-DD") that is not in the future. It is a day in
-// the team member's time zone, which can already be tomorrow in UTC, so one day of slack.
-function isPastDay(day: string): boolean {
+// Whether day is a real calendar day ("YYYY-MM-DD").
+function isDay(day: string): boolean {
   if (!/^\d{4}-\d\d-\d\d$/.test(day)) return false;
   const time = Date.parse(`${day}T00:00:00Z`);
   // Date.parse rolls "2026-02-30" over to March; the round trip catches that.
-  if (Number.isNaN(time) || new Date(time).toISOString().slice(0, 10) !== day) return false;
-  return time <= Date.now() + DAY_MS;
+  return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === day;
+}
+
+// Whether day is a real calendar day that is not in the future. It is a day in the team member's
+// time zone, which can already be tomorrow in UTC, so one day of slack.
+function isPastDay(day: string): boolean {
+  return isDay(day) && Date.parse(`${day}T00:00:00Z`) <= Date.now() + DAY_MS;
 }
 
 /**
@@ -106,6 +113,27 @@ function normalizePhone(phone: string): string | undefined {
     .replace(/[\s\-./()]/g, "");
   if (number.startsWith("00")) number = `+${number.slice(2)}`;
   return /^\+[1-9]\d{6,14}$/.test(number) ? number : undefined;
+}
+
+const INVALID_PHONE = "Phone number must be international, e.g. +31612345678";
+
+// An optional detail as given: undefined leaves it as it is, "" and null remove it.
+const orNull = (value: string | null | undefined) => (value === undefined ? undefined : value || null);
+
+/**
+ * Checks the details of an organization that can be refused: its phone number, returned in
+ * E.164, and its follow-up day. undefined (not given) stays undefined, "" and null become null.
+ */
+function checkOrgDetails(data: {
+  phone?: string | null;
+  follow_up_on?: string | null;
+}): Result<{ phone: string | null | undefined; follow_up_on: string | null | undefined }> {
+  const followUpOn = orNull(data.follow_up_on);
+  if (followUpOn && !isDay(followUpOn)) return refuse(400, "Invalid follow_up_on");
+  const given = orNull(data.phone);
+  const phone = given ? normalizePhone(given) : given;
+  if (given && !phone) return refuse(400, INVALID_PHONE);
+  return { ok: true, phone, follow_up_on: followUpOn };
 }
 
 /**
@@ -139,6 +167,25 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       .bind(organizationId)
       .all<{ community_id: number }>();
     return results.map(r => r.community_id);
+  }
+
+  private async organizationTeamMemberIds(organizationId: number): Promise<number[]> {
+    const { results } = await this.db
+      .prepare(`SELECT team_member_id FROM organization_team_members WHERE organization_id = ? ORDER BY team_member_id`)
+      .bind(organizationId)
+      .all<{ team_member_id: number }>();
+    return results.map(r => r.team_member_id);
+  }
+
+  // The organizations a team member handles.
+  private async memberOrganizationIds(memberId: number): Promise<number[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT organization_id FROM organization_team_members WHERE team_member_id = ? ORDER BY organization_id`
+      )
+      .bind(memberId)
+      .all<{ organization_id: number }>();
+    return results.map(r => r.organization_id);
   }
 
   private async memberCommunityIds(memberId: number): Promise<number[]> {
@@ -490,6 +537,10 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     const memberId = oldMember.id;
     const performedBy = toIntOrNull(data.performed_by);
     const oldIds = await this.memberCommunityIds(memberId);
+    // A member without access no longer follows anything up, so they stop handling organizations.
+    const oldOrganizationIds = await this.memberOrganizationIds(memberId);
+    const handledChange =
+      oldOrganizationIds.length > 0 ? { handled_organization_ids: { old: oldOrganizationIds, new: [] } } : {};
     const lastAdmin = refuse(409, "Cannot delete the last admin");
 
     // audit_log.performed_by, conversations.created_by and team_invites.invited_by/used_by
@@ -506,7 +557,7 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       .first<{ found: 0 | 1 }>();
     if (history?.found) {
       // One transaction: deactivate unless last admin, audit only that change, then drop the
-      // communities only if the member was deactivated (telegram_id now NULL).
+      // communities and handled organizations only if the member was deactivated (telegram_id now NULL).
       const [update] = await this.db.batch([
         this.db
           .prepare(
@@ -524,30 +575,35 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
               telegram_id: { old: oldMember.telegram_id, new: null },
               ...usernameChange,
               ...(oldMember.is_admin === 1 ? { is_admin: { old: 1, new: 0 } } : {}),
-              ...(oldIds.length > 0 ? { community_ids: { old: oldIds, new: [] } } : {})
+              ...(oldIds.length > 0 ? { community_ids: { old: oldIds, new: [] } } : {}),
+              ...handledChange
             }
           })
         ),
-        this.db
-          .prepare(
-            `DELETE FROM team_member_communities
-             WHERE team_member_id = ? AND (SELECT telegram_id FROM team_members WHERE id = ?) IS NULL`
-          )
-          .bind(memberId, memberId)
+        ...["team_member_communities", "organization_team_members"].map(table =>
+          this.db
+            .prepare(
+              `DELETE FROM ${table}
+               WHERE team_member_id = ? AND (SELECT telegram_id FROM team_members WHERE id = ?) IS NULL`
+            )
+            .bind(memberId, memberId)
+        )
       ]);
       if (update.meta.changes !== 1) return lastAdmin;
       return { ok: true, deactivated: true };
     }
 
-    // One transaction: community links, the member and the audit entry, each only if the
-    // member is not the last admin.
-    const [, deletion] = await this.db.batch([
-      this.db
-        .prepare(
-          `DELETE FROM team_member_communities
-           WHERE team_member_id = ? AND EXISTS (SELECT 1 FROM team_members WHERE id = ? AND ${NOT_LAST_ADMIN})`
-        )
-        .bind(memberId, memberId),
+    // One transaction: community links, handled organizations, the member and the audit entry,
+    // each only if the member is not the last admin.
+    const [, , deletion] = await this.db.batch([
+      ...["team_member_communities", "organization_team_members"].map(table =>
+        this.db
+          .prepare(
+            `DELETE FROM ${table}
+             WHERE team_member_id = ? AND EXISTS (SELECT 1 FROM team_members WHERE id = ? AND ${NOT_LAST_ADMIN})`
+          )
+          .bind(memberId, memberId)
+      ),
       this.db.prepare(`DELETE FROM team_members WHERE id = ? AND ${NOT_LAST_ADMIN}`).bind(memberId),
       this.db.prepare(auditSql("?", { afterChange: true })).bind(
         "delete",
@@ -561,7 +617,8 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
             name: { old: oldMember.name, new: null },
             time_zone: { old: oldMember.time_zone, new: null },
             is_admin: { old: oldMember.is_admin, new: null },
-            ...(oldIds.length > 0 ? { community_ids: { old: oldIds, new: [] } } : {})
+            ...(oldIds.length > 0 ? { community_ids: { old: oldIds, new: [] } } : {}),
+            ...handledChange
           }
         })
       )
@@ -770,10 +827,11 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
   // them; null when it does not exist.
   async organizationDetails(id: RowId, conversations = 5): Promise<OrganizationDetails | null> {
     const orgId = toInt(id);
-    const [org, communities, contacts, recent] = await this.db.batch([
+    const [org, communities, handlers, notes, contacts, recent] = await this.db.batch([
       this.db
         .prepare(
-          `SELECT o.id, o.name, o.status, s.label AS status_label, o.website, o.nostr_npub, o.location_osm_id
+          `SELECT o.id, o.name, o.status, s.label AS status_label, o.website, o.nostr_npub, o.location_osm_id,
+                  o.address, o.category, o.phone, o.email, o.follow_up_on
            FROM organizations o LEFT JOIN organization_statuses s ON s.id = o.status
            WHERE o.id = ?`
         )
@@ -784,18 +842,69 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
            WHERE oc.organization_id = ? ORDER BY bc.name`
         )
         .bind(orgId),
+      this.db.prepare(handlersSql("otm.organization_id = ?")).bind(orgId),
+      this.db.prepare(`SELECT note FROM organization_notes WHERE organization_id = ? ORDER BY id`).bind(orgId),
       this.db
         .prepare(`SELECT id, name FROM contacts WHERE organization_id = ? ORDER BY name COLLATE NOCASE, id`)
         .bind(orgId),
-      this.db.prepare(conversationsSql("c.organization_id = ?")).bind(orgId, conversations)
+      this.db
+        .prepare(conversationsSql("(conv.organization_id = ? OR c.organization_id = ?)"))
+        .bind(orgId, orgId, conversations)
     ]);
-    const row = org.results[0] as Omit<OrganizationDetails, "communities" | "contacts" | "conversations"> | undefined;
+    const row = org.results[0] as
+      Omit<OrganizationDetails, "communities" | "handled_by" | "notes" | "contacts" | "conversations"> | undefined;
     if (!row) return null;
     return {
       ...row,
       communities: (communities.results as { name: string }[]).map(c => c.name),
+      handled_by: handlers.results as Handler[],
+      notes: (notes.results as { note: string | null }[]).flatMap(n => (n.note ? [n.note] : [])),
       contacts: contacts.results as { id: number; name: string }[],
       conversations: recent.results as ConversationSummary[]
+    };
+  }
+
+  /**
+   * The organizations whose follow-up day is until or earlier, the earliest first, with the team
+   * members who handle them. With team_member_id only those that member handles and those nobody
+   * handles.
+   */
+  async followUps(search: FollowUpSearch): Promise<Result<{ follow_ups: FollowUp[] }>> {
+    if (!isDay(search.until)) return refuse(400, "Invalid until");
+    const memberId = toIntOrNull(search.team_member_id);
+    const mine = memberId
+      ? `AND (EXISTS (SELECT 1 FROM organization_team_members WHERE organization_id = o.id AND team_member_id = ?)
+              OR NOT EXISTS (SELECT 1 FROM organization_team_members WHERE organization_id = o.id))`
+      : "";
+    const [orgs, handlers] = await this.db.batch([
+      this.db
+        .prepare(
+          `SELECT o.id, o.name, o.follow_up_on, s.label AS status_label
+           FROM organizations o LEFT JOIN organization_statuses s ON s.id = o.status
+           WHERE o.follow_up_on IS NOT NULL AND o.follow_up_on <= ? ${mine}
+           ORDER BY o.follow_up_on, o.name COLLATE NOCASE, o.id`
+        )
+        .bind(...(memberId ? [search.until, memberId] : [search.until])),
+      this.db
+        .prepare(
+          handlersSql(
+            "otm.organization_id IN (SELECT id FROM organizations WHERE follow_up_on IS NOT NULL AND follow_up_on <= ?)",
+            "otm.organization_id"
+          )
+        )
+        .bind(search.until)
+    ]);
+    const byOrganization = new Map<number, Handler[]>();
+    for (const h of handlers.results as (Handler & { organization_id: number })[]) {
+      const { organization_id, ...handler } = h;
+      byOrganization.set(organization_id, [...(byOrganization.get(organization_id) ?? []), handler]);
+    }
+    return {
+      ok: true,
+      follow_ups: (orgs.results as Omit<FollowUp, "handled_by">[]).map(o => ({
+        ...o,
+        handled_by: byOrganization.get(o.id) ?? []
+      }))
     };
   }
 
@@ -804,7 +913,7 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (!data.contact_id) return refuse(400, "Missing contact_id");
     if (data.name !== undefined && !data.name.trim()) return refuse(400, "The name cannot be empty");
     const phone = data.phone ? normalizePhone(data.phone) : null;
-    if (phone === undefined) return refuse(400, "Phone number must be international, e.g. +31612345678");
+    if (phone === undefined) return refuse(400, INVALID_PHONE);
     const contactId = toInt(data.contact_id);
     // undefined keeps the organization, null (or 0) unlinks the contact from it.
     const organizationId = data.organization_id === undefined ? undefined : toIntOrNull(data.organization_id);
@@ -868,51 +977,74 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
   async updateOrg(data: UpdateOrgInput): Promise<Result<{ changed: boolean }>> {
     if (!data.organization_id) return refuse(400, "Missing organization_id");
     if (data.name !== undefined && !data.name.trim()) return refuse(400, "The name cannot be empty");
+    const details = checkOrgDetails(data);
+    if (!details.ok) return details;
     const orgId = toInt(data.organization_id);
     const status = data.status === undefined ? undefined : toInt(data.status);
     const communityIds = Array.isArray(data.community_ids) ? sortedIds(data.community_ids.map(toInt)) : undefined;
+    const memberIds = Array.isArray(data.team_member_ids) ? sortedIds(data.team_member_ids.map(toInt)) : undefined;
     const row = await this.db
       .prepare(
-        `SELECT name, status, website, nostr_npub, location_osm_id,
+        `SELECT name, status, website, nostr_npub, location_osm_id, address, category, phone, email, follow_up_on,
                 EXISTS (SELECT 1 FROM organization_statuses WHERE id = ?) AS known_status,
                 (SELECT COUNT(*) FROM bitcoin_communities WHERE id IN (SELECT value FROM json_each(?)))
-                  AS known_communities
+                  AS known_communities,
+                (SELECT COUNT(*) FROM team_members
+                 WHERE telegram_id IS NOT NULL AND id IN (SELECT value FROM json_each(?))) AS known_members
          FROM organizations WHERE id = ?`
       )
-      .bind(status ?? null, JSON.stringify(communityIds ?? []), orgId)
+      .bind(status ?? null, JSON.stringify(communityIds ?? []), JSON.stringify(memberIds ?? []), orgId)
       .first<{
         name: string;
         status: number | null;
         website: string | null;
         nostr_npub: string | null;
         location_osm_id: string | null;
+        address: string | null;
+        category: string | null;
+        phone: string | null;
+        email: string | null;
+        follow_up_on: string | null;
         known_status: 0 | 1;
         known_communities: number;
+        known_members: number;
       }>();
     if (!row) return refuse(404, "Organization not found");
     if (status !== undefined && !row.known_status) return refuse(400, "Unknown status");
     if (communityIds && row.known_communities !== communityIds.length) return refuse(400, "Unknown community");
-    const { known_status: _, known_communities: __, ...old } = row;
+    // Only members with access can handle an organization.
+    if (memberIds && row.known_members !== memberIds.length) return refuse(400, "Unknown team member");
+    const { known_status: _, known_communities: __, known_members: ___, ...old } = row;
     const { statements, fields } = this.columnUpdates("organizations", orgId, old, {
       name: data.name?.trim(),
       status,
-      website: data.website === undefined ? undefined : data.website || null,
-      nostr_npub: data.nostr_npub === undefined ? undefined : data.nostr_npub || null,
-      location_osm_id: data.location_osm_id === undefined ? undefined : data.location_osm_id || null
+      website: orNull(data.website),
+      nostr_npub: orNull(data.nostr_npub),
+      location_osm_id: orNull(data.location_osm_id),
+      address: orNull(data.address),
+      category: orNull(data.category),
+      phone: details.phone,
+      email: orNull(data.email),
+      follow_up_on: details.follow_up_on
     });
-    if (communityIds) {
-      const oldIds = await this.organizationCommunityIds(orgId);
-      if (!sameIds(oldIds, communityIds)) {
-        statements.push(
-          this.db.prepare(`DELETE FROM organization_communities WHERE organization_id = ?`).bind(orgId),
-          ...communityIds.map(communityId =>
-            this.db
-              .prepare(`INSERT INTO organization_communities (organization_id, community_id) VALUES (?, ?)`)
-              .bind(orgId, communityId)
-          )
-        );
-        fields.community_ids = { old: oldIds, new: communityIds };
-      }
+    const links = [
+      ["organization_communities", "community_id", "community_ids", communityIds],
+      ["organization_team_members", "team_member_id", "team_member_ids", memberIds]
+    ] as const;
+    for (const [table, column, field, newIds] of links) {
+      if (!newIds) continue;
+      const oldIds =
+        table === "organization_communities"
+          ? await this.organizationCommunityIds(orgId)
+          : await this.organizationTeamMemberIds(orgId);
+      if (sameIds(oldIds, newIds)) continue;
+      statements.push(
+        this.db.prepare(`DELETE FROM ${table} WHERE organization_id = ?`).bind(orgId),
+        ...newIds.map(id =>
+          this.db.prepare(`INSERT INTO ${table} (organization_id, ${column}) VALUES (?, ?)`).bind(orgId, id)
+        )
+      );
+      fields[field] = { old: oldIds, new: newIds };
     }
     return this.applyUpdate("organizations", orgId, data.updated_by, statements, fields);
   }
@@ -965,12 +1097,19 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (newOrganization && (!newOrganization.name || !newOrganization.status)) {
       return refuse(400, "Missing required fields for new_organization: name or status");
     }
+    const orgDetails = checkOrgDetails(newOrganization ?? {});
+    if (!orgDetails.ok) return orgDetails;
     const phone = data.phone ? normalizePhone(data.phone) : null;
-    if (phone === undefined) return refuse(400, "Phone number must be international, e.g. +31612345678");
+    if (phone === undefined) return refuse(400, INVALID_PHONE);
     const contactIdSql = lastIdSql("contacts");
     const createdBy = toIntOrNull(data.created_by);
     const organizationId = toIntOrNull(data.organization_id);
-    const statements = newOrganization ? this.newOrgStatements(newOrganization, createdBy) : [];
+    const statements = newOrganization
+      ? this.newOrgStatements(
+          { ...newOrganization, phone: orgDetails.phone, follow_up_on: orgDetails.follow_up_on },
+          createdBy
+        )
+      : [];
     // A new organization's id is only known inside the batch: taken from sqlite_sequence.
     statements.push(
       newOrganization
@@ -1018,34 +1157,57 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return { ok: true, id: contact.id, organization_id: contact.organization_id };
   }
 
-  // One transaction: organization, its communities and the audit entry.
+  // One transaction: organization, its communities, handlers and the audit entry.
   async newOrg(data: NewOrgInput): Promise<Result<{ id: number }>> {
     if (!data.name || !data.status) return refuse(400, "Missing required fields: name or status");
+    const details = checkOrgDetails(data);
+    if (!details.ok) return details;
     const results = await this.db.batch([
-      ...this.newOrgStatements(data, toIntOrNull(data.created_by)),
+      ...this.newOrgStatements(
+        { ...data, phone: details.phone, follow_up_on: details.follow_up_on },
+        toIntOrNull(data.created_by)
+      ),
       this.db.prepare(`SELECT seq AS id FROM sqlite_sequence WHERE name = 'organizations'`)
     ]);
     return { ok: true, id: lastId(results) };
   }
 
-  // Inserts an organization, its communities and its audit entry, for use in a batch; later
-  // statements of the batch get the new id as lastIdSql("organizations"). name and status are
-  // checked by the caller.
+  // Inserts an organization, its communities, its handlers and its audit entry, for use in a
+  // batch; later statements of the batch get the new id as lastIdSql("organizations"). The caller
+  // checks name and status, and passes phone and follow_up_on as checkOrgDetails returns them.
   private newOrgStatements(data: Omit<NewOrgInput, "created_by">, createdBy: number | null): D1PreparedStatement[] {
     const orgIdSql = lastIdSql("organizations");
     const status = toInt(data.status);
     const osmId = data.location_osm_id ? String(data.location_osm_id) : null;
-    const communityIds = (data.community_ids ?? []).map(toInt);
+    const communityIds = sortedIds((data.community_ids ?? []).map(toInt));
+    const memberIds = sortedIds((data.team_member_ids ?? []).map(toInt));
+    // The optional text details, in column order; only those given are logged.
+    const details = {
+      website: data.website || null,
+      nostr_npub: data.nostr_npub || null,
+      address: data.address || null,
+      category: data.category || null,
+      phone: data.phone || null,
+      email: data.email || null,
+      follow_up_on: data.follow_up_on || null
+    };
+    const links = [
+      ["organization_communities", "community_id", communityIds],
+      ["organization_team_members", "team_member_id", memberIds]
+    ] as const;
     return [
       this.db
         .prepare(
-          `INSERT INTO organizations (name, status, location_osm_id, website, nostr_npub) VALUES (?, ?, ?, ?, ?)`
+          `INSERT INTO organizations (name, status, location_osm_id, ${Object.keys(details).join(", ")})
+           VALUES (?, ?, ?, ${Object.keys(details)
+             .map(() => "?")
+             .join(", ")})`
         )
-        .bind(data.name, status, osmId, data.website || null, data.nostr_npub || null),
-      ...communityIds.map(communityId =>
-        this.db
-          .prepare(`INSERT INTO organization_communities (organization_id, community_id) VALUES (${orgIdSql}, ?)`)
-          .bind(communityId)
+        .bind(data.name, status, osmId, ...Object.values(details)),
+      ...links.flatMap(([table, column, ids]) =>
+        ids.map(id =>
+          this.db.prepare(`INSERT INTO ${table} (organization_id, ${column}) VALUES (${orgIdSql}, ?)`).bind(id)
+        )
       ),
       this.db.prepare(auditSql(insertedIdText("organizations"))).bind(
         "insert",
@@ -1056,29 +1218,38 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
             name: created(data.name),
             status: created(status),
             ...(osmId ? { location_osm_id: created(osmId) } : {}),
-            ...(data.website ? { website: created(data.website) } : {}),
-            ...(data.nostr_npub ? { nostr_npub: created(data.nostr_npub) } : {}),
-            ...(communityIds.length > 0 ? { community_ids: created(communityIds) } : {})
+            ...Object.fromEntries(
+              Object.entries(details).flatMap(([column, value]) => (value ? [[column, created(value)]] : []))
+            ),
+            ...(communityIds.length > 0 ? { community_ids: created(communityIds) } : {}),
+            ...(memberIds.length > 0 ? { team_member_ids: created(memberIds) } : {})
           }
         })
       )
     ];
   }
 
-  // One transaction: the conversation and its audit entry.
+  // One transaction: the conversation and its audit entry. It is with a contact or with an
+  // organization itself (contact_id NULL).
   async logConversation(data: LogConversationInput): Promise<Result<{ id: number }>> {
-    if (!data.contact_id) return refuse(400, "Missing contact_id (must be unique, selected from UI)");
+    if (data.contact_id && data.organization_id) {
+      return refuse(400, "Give either contact_id or organization_id, not both");
+    }
+    if (!data.contact_id && !data.organization_id) return refuse(400, "Missing contact_id or organization_id");
     if (!data.channel) return refuse(400, "Missing channel");
-    const contactId = toInt(data.contact_id);
+    const contactId = toIntOrNull(data.contact_id);
+    const organizationId = toIntOrNull(data.organization_id);
     const known = await this.db
       .prepare(
         `SELECT EXISTS (SELECT 1 FROM contacts WHERE id = ?) AS contact,
+                EXISTS (SELECT 1 FROM organizations WHERE id = ?) AS organization,
                 EXISTS (SELECT 1 FROM channels WHERE id = ?) AS channel`
       )
-      .bind(contactId, data.channel)
-      .first<{ contact: 0 | 1; channel: 0 | 1 }>();
-    if (!known?.contact) return refuse(404, "Contact not found");
-    if (!known.channel) return refuse(400, "Unknown channel");
+      .bind(contactId, organizationId, data.channel)
+      .first<{ contact: 0 | 1; organization: 0 | 1; channel: 0 | 1 }>();
+    if (contactId && !known?.contact) return refuse(404, "Contact not found");
+    if (organizationId && !known?.organization) return refuse(404, "Organization not found");
+    if (!known?.channel) return refuse(400, "Unknown channel");
     const happenedOn = data.happened_on || null;
     if (happenedOn && !isPastDay(happenedOn)) return refuse(400, "Invalid happened_on");
     const createdBy = toIntOrNull(data.created_by);
@@ -1086,16 +1257,17 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     const results = await this.db.batch([
       this.db
         .prepare(
-          `INSERT INTO conversations (contact_id, channel, note, happened_on, created_by) VALUES (?, ?, ?, ?, ?)`
+          `INSERT INTO conversations (contact_id, organization_id, channel, note, happened_on, created_by)
+           VALUES (?, ?, ?, ?, ?, ?)`
         )
-        .bind(contactId, data.channel, note, happenedOn, createdBy),
+        .bind(contactId, organizationId, data.channel, note, happenedOn, createdBy),
       this.db.prepare(auditSql(insertedIdText("conversations"))).bind(
         "insert",
         "conversations",
         createdBy,
         JSON.stringify({
           fields: {
-            contact_id: created(contactId),
+            ...(contactId ? { contact_id: created(contactId) } : { organization_id: created(organizationId) }),
             channel: created(data.channel),
             ...(note ? { note: created(note) } : {}),
             ...(happenedOn ? { happened_on: created(happenedOn) } : {})
@@ -1111,14 +1283,15 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
 // The first email address or phone number of a contact.
 type Detail = { id: number; value: string };
 
-// Conversations with their channel label, contact, the day they took place, and when and by whom
-// they were logged (from the audit entry when created_by is empty), the most recent day first;
-// without happened_on the day they were logged counts. Binds where's parameters and the limit.
+// Conversations with their channel label, contact (none for one with the organization itself),
+// the day they took place, and when and by whom they were logged (from the audit entry when
+// created_by is empty), the most recent day first; without happened_on the day they were logged
+// counts. Binds where's parameters and the limit.
 const conversationsSql = (where: string) => `
   SELECT conv.id, conv.contact_id, c.name AS contact_name, COALESCE(ch.label, conv.channel) AS channel, conv.note,
          conv.happened_on, a.timestamp AS logged_at, tm.name AS logged_by
   FROM conversations conv
-  JOIN contacts c ON c.id = conv.contact_id
+  LEFT JOIN contacts c ON c.id = conv.contact_id
   LEFT JOIN channels ch ON ch.id = conv.channel
   LEFT JOIN audit_log a
     ON a.table_name = 'conversations' AND a.action = 'insert' AND a.record_id = CAST(conv.id AS TEXT)
@@ -1126,6 +1299,14 @@ const conversationsSql = (where: string) => `
   WHERE ${where}
   ORDER BY COALESCE(conv.happened_on, date(a.timestamp)) DESC, conv.id DESC
   LIMIT ?`;
+
+// The team members who handle organizations (alias otm), by name; extra columns go in front.
+const handlersSql = (where: string, extra?: string) => `
+  SELECT ${extra ? `${extra}, ` : ""}tm.id, tm.telegram_id, tm.name
+  FROM organization_team_members otm
+  JOIN team_members tm ON tm.id = otm.team_member_id
+  WHERE ${where}
+  ORDER BY tm.name COLLATE NOCASE, tm.id`;
 
 // The first row of the batch's last statement.
 function lastRow<T>(results: D1Result[]): T {

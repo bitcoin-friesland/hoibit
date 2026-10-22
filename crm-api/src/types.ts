@@ -22,6 +22,9 @@ export interface TeamMember {
 
 export type TeamMemberSummary = Pick<TeamMember, "id" | "telegram_id" | "telegram_username" | "name" | "is_admin">;
 
+// A team member who handles an organization (organization_team_members).
+export type Handler = Pick<TeamMember, "id" | "telegram_id" | "name">;
+
 export interface Community {
   id: number;
   name: string;
@@ -141,12 +144,25 @@ export interface NewOrgInput {
   location_osm_id?: string | number | null;
   website?: string | null;
   nostr_npub?: string | null;
+  // Street and number with the place, e.g. "Voorbeeldstraat 1, Sneek".
+  address?: string | null;
+  // The kind of business, e.g. "Restaurant - Lunch".
+  category?: string | null;
+  // The business's own number, international as for newContact.
+  phone?: string | null;
+  email?: string | null;
+  // The day it should next be contacted, "YYYY-MM-DD".
+  follow_up_on?: string | null;
   community_ids?: RowId[];
+  // The team members who handle it.
+  team_member_ids?: RowId[];
   created_by?: RowId | null;
 }
 
+// A conversation is with a contact or with an organization itself; give one of the two.
 export interface LogConversationInput {
-  contact_id: RowId;
+  contact_id?: RowId | null;
+  organization_id?: RowId | null;
   channel: string;
   note?: string | null;
   // The day it took place, "YYYY-MM-DD" in the team member's time zone; not in the future.
@@ -181,15 +197,25 @@ export interface UpdateOrgInput {
   nostr_npub?: string | null;
   // The place on OpenStreetMap, e.g. "node/123"; null removes it.
   location_osm_id?: string | null;
+  address?: string | null;
+  category?: string | null;
+  // International, as for newContact; null removes it.
+  phone?: string | null;
+  email?: string | null;
+  // "YYYY-MM-DD", also a day to come; null removes it.
+  follow_up_on?: string | null;
   // Replaces the organization's communities; [] removes them all.
   community_ids?: RowId[];
+  // Replaces the team members who handle it; [] removes them all.
+  team_member_ids?: RowId[];
   updated_by?: RowId | null;
 }
 
 export interface ConversationSummary {
   id: number;
-  contact_id: number;
-  contact_name: string;
+  // Both null for a conversation with the organization itself.
+  contact_id: number | null;
+  contact_name: string | null;
   // The channel's label, e.g. "In Person".
   channel: string;
   note: string | null;
@@ -224,10 +250,36 @@ export interface OrganizationDetails {
   website: string | null;
   nostr_npub: string | null;
   location_osm_id: string | null;
+  address: string | null;
+  category: string | null;
+  phone: string | null;
+  email: string | null;
+  follow_up_on: string | null;
   communities: string[];
+  // By name.
+  handled_by: Handler[];
+  // In the order they were added.
+  notes: string[];
   contacts: { id: number; name: string }[];
-  // With any of its contacts, the most recent first.
+  // With the organization itself or any of its contacts, the most recent first.
   conversations: ConversationSummary[];
+}
+
+// An organization whose follow-up day has come or is near (followUps).
+export interface FollowUp {
+  id: number;
+  name: string;
+  follow_up_on: string;
+  status_label: string | null;
+  // By name; empty when nobody handles it.
+  handled_by: Handler[];
+}
+
+export interface FollowUpSearch {
+  // Up to and including this day, "YYYY-MM-DD".
+  until: string;
+  // Only the organizations this team member handles, and those nobody handles.
+  team_member_id?: RowId | null;
 }
 
 export interface OrganizationSearch {
