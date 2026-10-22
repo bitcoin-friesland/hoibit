@@ -131,7 +131,9 @@ const dayOn = (day: string) => (day === teamDay(0) ? "today" : `on ${followUpLab
  */
 export async function followUpList(env: Env, memberId: number): Promise<{ text: string; options: SendOptions }> {
   const until = teamDayIn(LIST_DAYS);
-  const due = await env.crmApi.followUps({ until, team_member_id: memberId });
+  const res = await env.crmApi.followUps({ until, team_member_id: memberId });
+  if (!res.ok) throw new Error(res.error);
+  const due = res.follow_ups;
   if (due.length === 0) return { text: `Nothing to follow up until ${followUpLabel(until)}. 🎉`, options: {} };
   const shown = due.slice(0, LIST_MAX);
   const lines = shown.map(f => {
