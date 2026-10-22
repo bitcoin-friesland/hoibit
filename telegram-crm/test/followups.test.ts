@@ -76,7 +76,8 @@ describe("organization card", () => {
       `edit:o:${orgId}`,
       `status:${orgId}`,
       `log:o:${orgId}`,
-      `fu:${orgId}`
+      `fu:${orgId}`,
+      `hist:o:${orgId}:0`
     ]);
   });
 });

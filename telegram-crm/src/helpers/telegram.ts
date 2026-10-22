@@ -1,7 +1,7 @@
 import type { ChatId, InlineKeyboardButton, SendOptions } from "../types";
 
 // Telegram's limit for the text of one message.
-const MAX_MESSAGE_LENGTH = 4096;
+export const MAX_MESSAGE_LENGTH = 4096;
 
 interface TelegramResponse<T> {
   ok: boolean;

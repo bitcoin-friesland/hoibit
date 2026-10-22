@@ -3,11 +3,13 @@
  * Its buttons belong to no session and work on old cards too, like log:<id>: show:c:<id> and
  * show:o:<id> open a card, edit:c:<id> and edit:o:<id> start editing one (flows/edit.ts),
  * status:<id> changes an organization's status (flows/status.ts), fu:<id> its follow-up day
- * (flows/followup.ts), and log:o:<id> logs a conversation with the organization itself.
+ * (flows/followup.ts), log:o:<id> logs a conversation with the organization itself, and
+ * hist:c:<id>:0 and hist:o:<id>:0 show all conversations in full (helpers/history.ts).
  */
 import type { ConversationSummary } from "../../../crm-api/src/types";
 import { followUpLabel } from "./day";
 import { followUpButton } from "../flows/followup";
+import { historyButton } from "./history";
 import { statusButton } from "../flows/status";
 import type { InlineKeyboardButton, SendOptions } from "../types";
 
@@ -18,7 +20,7 @@ export interface RecordRef {
 
 // The other contacts and organizations a card links to, at most.
 const LINKED_MAX = 5;
-// Longer notes are cut, so five conversations keep the card short.
+// Longer notes are cut, so five conversations keep the card short; 📜 Conversations shows them in full.
 const NOTE_MAX_LENGTH = 120;
 // The organization's notes shown on its card, at most.
 const NOTES_MAX = 3;
@@ -33,20 +35,21 @@ export function parseRecordData(data: string, action: "show" | "edit"): RecordRe
   return { kind: match[2] === "c" ? "contact" : "organization", id: Number(match[3]) };
 }
 
-const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+export const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
 // "• 2026-10-21 · Anna · Phone (Jan): Interested in a terminal"; withContact on an organization's card.
 // The day it took place, or for conversations logged before that was asked, the day it was logged.
-function conversationLine(c: ConversationSummary, withContact: boolean) {
+// The note is cut to max.
+export function conversationLine(c: ConversationSummary, withContact: boolean, max = Infinity) {
   const when = c.happened_on ?? c.logged_at?.slice(0, 10);
   const about = [when, withContact ? c.contact_name : undefined, c.channel].filter(Boolean).join(" · ");
   const by = c.logged_by ? ` (${c.logged_by})` : "";
-  return `• ${about}${by}${c.note ? `: ${clip(c.note, NOTE_MAX_LENGTH)}` : ""}`;
+  return `• ${about}${by}${c.note ? `: ${clip(c.note, max)}` : ""}`;
 }
 
 function conversationLines(conversations: ConversationSummary[], withContact: boolean) {
   if (conversations.length === 0) return ["No conversations logged yet."];
-  return ["Recent conversations:", ...conversations.map(c => conversationLine(c, withContact))];
+  return ["Recent conversations:", ...conversations.map(c => conversationLine(c, withContact, NOTE_MAX_LENGTH))];
 }
 
 /**
@@ -72,6 +75,7 @@ export async function recordCard(
     if (contact.nostr_npub) lines.push(`🟣 ${contact.nostr_npub}`);
     lines.push("", ...conversationLines(contact.conversations, false));
     buttons[0].push({ text: "💬 Log conversation", callback_data: `log:${contact.id}` });
+    if (contact.conversations.length > 0) buttons.push([historyButton(ref)]);
     if (contact.organization_id && contact.organization_name) {
       buttons.push([
         {
@@ -86,6 +90,7 @@ export async function recordCard(
   if (!org) return undefined;
   buttons[0].push(statusButton(org.id));
   buttons.push([{ text: "💬 Log conversation", callback_data: `log:o:${org.id}` }, followUpButton(org.id)]);
+  if (org.conversations.length > 0 || org.notes.length > 0) buttons.push([historyButton(ref)]);
   const lines = [`🏢 ${org.name}`, `🏷️ ${org.status_label ?? "No status"}`];
   if (org.category) lines.push(`🏪 ${org.category}`);
   if (org.address) lines.push(`🏠 ${org.address}`);
