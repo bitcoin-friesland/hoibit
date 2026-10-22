@@ -133,6 +133,14 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return !!row && row.is_admin === 1;
   }
 
+  private async organizationCommunityIds(organizationId: number): Promise<number[]> {
+    const { results } = await this.db
+      .prepare(`SELECT community_id FROM organization_communities WHERE organization_id = ? ORDER BY community_id`)
+      .bind(organizationId)
+      .all<{ community_id: number }>();
+    return results.map(r => r.community_id);
+  }
+
   private async memberCommunityIds(memberId: number): Promise<number[]> {
     const { results } = await this.db
       .prepare(`SELECT community_id FROM team_member_communities WHERE team_member_id = ? ORDER BY community_id`)
@@ -580,6 +588,21 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return results;
   }
 
+  // The communities an organization belongs to, by name.
+  async organizationCommunities(organizationId: RowId): Promise<Community[]> {
+    const { results } = await this.db
+      .prepare(
+        `SELECT c.id, c.name, c.country, c.region
+         FROM organization_communities oc
+         JOIN bitcoin_communities c ON oc.community_id = c.id
+         WHERE oc.organization_id = ?
+         ORDER BY c.name`
+      )
+      .bind(toInt(organizationId))
+      .all<Community>();
+    return results;
+  }
+
   async communityCountries(): Promise<string[]> {
     const { results } = await this.db
       .prepare("SELECT DISTINCT country FROM bitcoin_communities")
@@ -783,8 +806,17 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     const phone = data.phone ? normalizePhone(data.phone) : null;
     if (phone === undefined) return refuse(400, "Phone number must be international, e.g. +31612345678");
     const contactId = toInt(data.contact_id);
+    // undefined keeps the organization, null (or 0) unlinks the contact from it.
+    const organizationId = data.organization_id === undefined ? undefined : toIntOrNull(data.organization_id);
     const [contact, email, oldPhone] = await this.db.batch([
-      this.db.prepare(`SELECT name, nostr_npub FROM contacts WHERE id = ?`).bind(contactId),
+      this.db
+        .prepare(
+          `SELECT name, type, organization_id, nostr_npub,
+                  EXISTS (SELECT 1 FROM contact_types WHERE id = ?) AS known_type,
+                  EXISTS (SELECT 1 FROM organizations WHERE id = ?) AS known_organization
+           FROM contacts WHERE id = ?`
+        )
+        .bind(data.type ?? null, organizationId ?? null, contactId),
       this.db
         .prepare(`SELECT id, email AS value FROM contact_emails WHERE contact_id = ? ORDER BY id LIMIT 1`)
         .bind(contactId),
@@ -792,11 +824,25 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
         .prepare(`SELECT id, phone AS value FROM contact_phones WHERE contact_id = ? ORDER BY id LIMIT 1`)
         .bind(contactId)
     ]);
-    const old = contact.results[0] as { name: string; nostr_npub: string | null } | undefined;
-    if (!old) return refuse(404, "Contact not found");
+    const row = contact.results[0] as
+      | {
+          name: string;
+          type: string | null;
+          organization_id: number | null;
+          nostr_npub: string | null;
+          known_type: 0 | 1;
+          known_organization: 0 | 1;
+        }
+      | undefined;
+    if (!row) return refuse(404, "Contact not found");
+    if (data.type !== undefined && !row.known_type) return refuse(400, "Unknown contact type");
+    if (organizationId && !row.known_organization) return refuse(404, "Organization not found");
+    const { known_type: _, known_organization: __, ...old } = row;
 
     const { statements, fields } = this.columnUpdates("contacts", contactId, old, {
       name: data.name?.trim(),
+      type: data.type,
+      organization_id: organizationId,
       nostr_npub: data.nostr_npub === undefined ? undefined : data.nostr_npub || null
     });
     const details: [string, Detail | undefined, string | null | undefined][] = [
@@ -824,29 +870,50 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (data.name !== undefined && !data.name.trim()) return refuse(400, "The name cannot be empty");
     const orgId = toInt(data.organization_id);
     const status = data.status === undefined ? undefined : toInt(data.status);
+    const communityIds = Array.isArray(data.community_ids) ? sortedIds(data.community_ids.map(toInt)) : undefined;
     const row = await this.db
       .prepare(
-        `SELECT name, status, website, nostr_npub,
-                EXISTS (SELECT 1 FROM organization_statuses WHERE id = ?) AS known_status
+        `SELECT name, status, website, nostr_npub, location_osm_id,
+                EXISTS (SELECT 1 FROM organization_statuses WHERE id = ?) AS known_status,
+                (SELECT COUNT(*) FROM bitcoin_communities WHERE id IN (SELECT value FROM json_each(?)))
+                  AS known_communities
          FROM organizations WHERE id = ?`
       )
-      .bind(status ?? null, orgId)
+      .bind(status ?? null, JSON.stringify(communityIds ?? []), orgId)
       .first<{
         name: string;
         status: number | null;
         website: string | null;
         nostr_npub: string | null;
+        location_osm_id: string | null;
         known_status: 0 | 1;
+        known_communities: number;
       }>();
     if (!row) return refuse(404, "Organization not found");
     if (status !== undefined && !row.known_status) return refuse(400, "Unknown status");
-    const { known_status: _, ...old } = row;
+    if (communityIds && row.known_communities !== communityIds.length) return refuse(400, "Unknown community");
+    const { known_status: _, known_communities: __, ...old } = row;
     const { statements, fields } = this.columnUpdates("organizations", orgId, old, {
       name: data.name?.trim(),
       status,
       website: data.website === undefined ? undefined : data.website || null,
-      nostr_npub: data.nostr_npub === undefined ? undefined : data.nostr_npub || null
+      nostr_npub: data.nostr_npub === undefined ? undefined : data.nostr_npub || null,
+      location_osm_id: data.location_osm_id === undefined ? undefined : data.location_osm_id || null
     });
+    if (communityIds) {
+      const oldIds = await this.organizationCommunityIds(orgId);
+      if (!sameIds(oldIds, communityIds)) {
+        statements.push(
+          this.db.prepare(`DELETE FROM organization_communities WHERE organization_id = ?`).bind(orgId),
+          ...communityIds.map(communityId =>
+            this.db
+              .prepare(`INSERT INTO organization_communities (organization_id, community_id) VALUES (?, ?)`)
+              .bind(orgId, communityId)
+          )
+        );
+        fields.community_ids = { old: oldIds, new: communityIds };
+      }
+    }
     return this.applyUpdate("organizations", orgId, data.updated_by, statements, fields);
   }
 
