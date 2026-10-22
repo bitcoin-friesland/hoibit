@@ -1251,18 +1251,29 @@ describe("organization details from Baserow", () => {
     const nobody = await add("Nobody", "2026-11-01", []);
     await add("No day", null, [adminId]);
 
-    expect((await crm.followUps({ until: "2026-12-31" })).map(f => f.id)).toEqual([nobody, bobs, mine]);
-    expect(await crm.followUps({ until: "2026-12-31", team_member_id: adminId })).toEqual([
-      { id: nobody, name: "Nobody", follow_up_on: "2026-11-01", status_label: "Curious about Bitcoin", handled_by: [] },
-      {
-        id: mine,
-        name: "Mine",
-        follow_up_on: "2026-11-03",
-        status_label: "Curious about Bitcoin",
-        handled_by: [{ id: adminId, name: "Admin", telegram_id: "1001" }]
-      }
-    ]);
-    await expect(crm.followUps({ until: "31-12-2026" })).rejects.toThrow();
+    const all = await crm.followUps({ until: "2026-12-31" });
+    if (!all.ok) throw new Error(all.error);
+    expect(all.follow_ups.map(f => f.id)).toEqual([nobody, bobs, mine]);
+    expect(await crm.followUps({ until: "2026-12-31", team_member_id: adminId })).toEqual({
+      ok: true,
+      follow_ups: [
+        {
+          id: nobody,
+          name: "Nobody",
+          follow_up_on: "2026-11-01",
+          status_label: "Curious about Bitcoin",
+          handled_by: []
+        },
+        {
+          id: mine,
+          name: "Mine",
+          follow_up_on: "2026-11-03",
+          status_label: "Curious about Bitcoin",
+          handled_by: [{ id: adminId, name: "Admin", telegram_id: "1001" }]
+        }
+      ]
+    });
+    expect(await crm.followUps({ until: "31-12-2026" })).toMatchObject({ ok: false, status: 400 });
   });
 
   it("stops a removed team member handling organizations", async () => {
