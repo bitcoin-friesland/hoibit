@@ -287,6 +287,22 @@ export interface FollowUpSearch {
   team_member_id?: RowId | null;
 }
 
+// The conversations of one contact, or of one organization (with it or with any of its contacts).
+export interface ConversationSearch {
+  contact_id?: RowId | null;
+  organization_id?: RowId | null;
+  // How many of the most recent to skip; 0 by default.
+  offset?: number;
+  // At most this many, 1-50; 20 by default.
+  limit?: number;
+}
+
+// One page of conversationHistory, the most recent first; more is true when older ones follow.
+export interface ConversationPage {
+  conversations: ConversationSummary[];
+  more: boolean;
+}
+
 export interface OrganizationSearch {
   name?: string | null;
   domain?: string | null;

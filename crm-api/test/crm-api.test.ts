@@ -977,6 +977,83 @@ describe("organizationDetails", () => {
   });
 });
 
+describe("conversationHistory", () => {
+  // Cafe with contacts Anna and Bob; Anna's conversations on 2026-10-01..05, then one with the
+  // organization itself on 2026-10-06 and one with Bob on 2026-10-07.
+  async function seed() {
+    const org = await crm.newOrg({ name: "Cafe", status: 1 });
+    if (!org.ok) throw new Error(org.error);
+    const anna = await crm.newContact({ name: "Anna", type: "entrepreneur", organization_id: org.id });
+    const bob = await crm.newContact({ name: "Bob", type: "entrepreneur", organization_id: org.id });
+    if (!anna.ok || !bob.ok) throw new Error("setup failed");
+    for (let day = 1; day <= 5; day++) {
+      await crm.logConversation({
+        contact_id: anna.id,
+        channel: "phone",
+        note: `Call ${day}`,
+        happened_on: `2026-10-0${day}`
+      });
+    }
+    await crm.logConversation({
+      organization_id: org.id,
+      channel: "in-person",
+      note: "Visit",
+      happened_on: "2026-10-06"
+    });
+    await crm.logConversation({ contact_id: bob.id, channel: "email", note: "Mail", happened_on: "2026-10-07" });
+    return { orgId: org.id, annaId: anna.id };
+  }
+
+  const notes = (res: Awaited<ReturnType<typeof crm.conversationHistory>>) => {
+    if (!res.ok) throw new Error(res.error);
+    return [res.conversations.map(c => c.note), res.more];
+  };
+
+  it("pages through a contact's conversations, the most recent first", async () => {
+    const { annaId } = await seed();
+    expect(notes(await crm.conversationHistory({ contact_id: annaId, limit: 2 }))).toEqual([
+      ["Call 5", "Call 4"],
+      true
+    ]);
+    expect(notes(await crm.conversationHistory({ contact_id: annaId, offset: 2, limit: 2 }))).toEqual([
+      ["Call 3", "Call 2"],
+      true
+    ]);
+    expect(notes(await crm.conversationHistory({ contact_id: annaId, offset: 4, limit: 2 }))).toEqual([
+      ["Call 1"],
+      false
+    ]);
+    expect(notes(await crm.conversationHistory({ contact_id: annaId, offset: 5 }))).toEqual([[], false]);
+  });
+
+  it("includes conversations with the organization itself and with all its contacts", async () => {
+    const { orgId } = await seed();
+    const res = await crm.conversationHistory({ organization_id: orgId });
+    expect(notes(res)).toEqual([["Mail", "Visit", "Call 5", "Call 4", "Call 3", "Call 2", "Call 1"], false]);
+    if (!res.ok) throw new Error(res.error);
+    expect(res.conversations[1]).toMatchObject({ contact_id: null, contact_name: null, channel: "In Person" });
+    expect(res.conversations[0]).toMatchObject({ contact_name: "Bob", happened_on: "2026-10-07" });
+  });
+
+  it("has no conversations for a record that does not exist", async () => {
+    expect(notes(await crm.conversationHistory({ organization_id: 999 }))).toEqual([[], false]);
+  });
+
+  it("refuses both or neither record, and an offset or limit out of range", async () => {
+    const { orgId, annaId } = await seed();
+    for (const search of [
+      { contact_id: annaId, organization_id: orgId },
+      {},
+      { contact_id: annaId, offset: -1 },
+      { contact_id: annaId, offset: 1.5 },
+      { contact_id: annaId, limit: 0 },
+      { contact_id: annaId, limit: 51 }
+    ]) {
+      expect(await crm.conversationHistory(search)).toMatchObject({ ok: false, status: 400 });
+    }
+  });
+});
+
 describe("updateContact", () => {
   async function createAnna() {
     const res = await crm.newContact({
