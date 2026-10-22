@@ -324,6 +324,30 @@ describe("updateTeamMember", () => {
     expect(res).toEqual({ ok: true });
     expect(await auditCount()).toBe(before);
   });
+
+  it("lets a member change their own name and communities, but not someone else's", async () => {
+    const adminId = await createFirstUser();
+    const memberId = await addMember(adminId, "2002", "Member", [1]);
+    const own = await crm.updateTeamMember({
+      team_member_id: memberId,
+      name: "Renamed",
+      community_ids: [2],
+      updated_by: memberId
+    });
+    expect(own).toEqual({ ok: true });
+    expect(await crm.validateUser("2002")).toMatchObject({ name: "Renamed" });
+    expect((await crm.teamMemberCommunities("2002")).map(c => c.id)).toEqual([2]);
+    expect(await lastAudit("update")).toMatchObject({ record_id: String(memberId), performed_by: memberId });
+
+    expect(
+      await crm.updateTeamMember({ team_member_id: adminId, name: "Hijacked", updated_by: memberId })
+    ).toMatchObject({ ok: false, status: 403 });
+    expect(await crm.updateTeamMember({ team_member_id: memberId, name: "Nobody", updated_by: null })).toMatchObject({
+      ok: false,
+      status: 403
+    });
+    expect(await crm.validateUser("1001")).toMatchObject({ name: "Admin" });
+  });
 });
 
 describe("setAdmin", () => {
@@ -676,6 +700,29 @@ describe("logConversation", () => {
     const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM conversations").first();
     expect(count).toEqual({ n: 0 });
   });
+
+  it("stores the day the conversation took place and logs it", async () => {
+    const contactId = await createContact();
+    const res = await crm.logConversation({ contact_id: contactId, channel: "phone", happened_on: "2026-10-20" });
+    if (!res.ok) throw new Error(res.error);
+    const row = await env.DB.prepare("SELECT happened_on FROM conversations WHERE id = ?").bind(res.id).first();
+    expect(row).toEqual({ happened_on: "2026-10-20" });
+    expect((await lastAudit("insert")).details.fields.happened_on).toEqual({ old: null, new: "2026-10-20" });
+  });
+
+  it("refuses a day that does not exist, is in the future or is not YYYY-MM-DD", async () => {
+    const contactId = await createContact();
+    const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    for (const happened_on of ["2026-02-30", nextWeek, "20-10-2026", "2026-10-20T10:00"]) {
+      expect(await crm.logConversation({ contact_id: contactId, channel: "phone", happened_on })).toMatchObject({
+        ok: false,
+        status: 400,
+        error: "Invalid happened_on"
+      });
+    }
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM conversations").first();
+    expect(count).toEqual({ n: 0 });
+  });
 });
 
 describe("searchContacts", () => {
@@ -783,6 +830,25 @@ describe("contactDetails", () => {
     expect(details!.conversations[0].logged_at).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
     expect((await crm.contactDetails(res.id, 1))!.conversations).toHaveLength(1);
     expect(await crm.contactDetails(9999)).toBeNull();
+  });
+
+  it("puts the conversations in the order they took place, not the order they were logged", async () => {
+    const res = await crm.newContact({ name: "Anna", type: "consumer" });
+    if (!res.ok) throw new Error(res.error);
+    await crm.logConversation({ contact_id: res.id, channel: "phone", note: "Today" });
+    await crm.logConversation({ contact_id: res.id, channel: "phone", note: "Last week", happened_on: "2026-10-14" });
+    await crm.logConversation({ contact_id: res.id, channel: "phone", note: "Yesterday", happened_on: "2026-10-20" });
+    // Without happened_on, the day it was logged counts.
+    await env.DB.prepare(
+      "UPDATE audit_log SET timestamp = '2026-10-21 09:00:00' WHERE table_name = 'conversations'"
+    ).run();
+
+    const details = await crm.contactDetails(res.id);
+    expect(details!.conversations.map(c => [c.note, c.happened_on])).toEqual([
+      ["Today", null],
+      ["Yesterday", "2026-10-20"],
+      ["Last week", "2026-10-14"]
+    ]);
   });
 });
 
