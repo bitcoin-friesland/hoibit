@@ -5,6 +5,8 @@ import type {
   Community,
   ContactDetails,
   ContactSearchRow,
+  ConversationPage,
+  ConversationSearch,
   ConversationSummary,
   CreateInviteInput,
   DeleteTeamMemberInput,
@@ -931,6 +933,30 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
   }
 
   /**
+   * A page of the conversations of a contact or an organization, in the order of contactDetails
+   * and organizationDetails, for reading back all of them. Refused unless exactly one of
+   * contact_id and organization_id is given, or when offset or limit is out of range; a contact
+   * or organization that does not exist has no conversations.
+   */
+  async conversationHistory(search: ConversationSearch): Promise<Result<ConversationPage>> {
+    const contactId = toIntOrNull(search.contact_id);
+    const orgId = toIntOrNull(search.organization_id);
+    if (!contactId === !orgId) return refuse(400, "Give either contact_id or organization_id");
+    const offset = search.offset ?? 0;
+    const limit = search.limit ?? CONVERSATION_PAGE;
+    if (!Number.isInteger(offset) || offset < 0) return refuse(400, "Invalid offset");
+    if (!Number.isInteger(limit) || limit < 1 || limit > CONVERSATION_PAGE_MAX) return refuse(400, "Invalid limit");
+    // One more than asked tells whether older ones follow.
+    const statement = contactId
+      ? this.db.prepare(`${conversationsSql("conv.contact_id = ?")} OFFSET ?`).bind(contactId, limit + 1, offset)
+      : this.db
+          .prepare(`${conversationsSql("(conv.organization_id = ? OR c.organization_id = ?)")} OFFSET ?`)
+          .bind(orgId, orgId, limit + 1, offset);
+    const { results } = await statement.all<ConversationSummary>();
+    return { ok: true, conversations: results.slice(0, limit), more: results.length > limit };
+  }
+
+  /**
    * The organizations whose follow-up day is until or earlier, the earliest first, with the team
    * members who handle them. With team_member_id only those that member handles and those nobody
    * with access handles (no handler, or only placeholders that have not joined yet).
@@ -1346,13 +1372,17 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
   }
 }
 
+// conversationHistory's page size by default, and at most.
+const CONVERSATION_PAGE = 20;
+const CONVERSATION_PAGE_MAX = 50;
+
 // The first email address or phone number of a contact.
 type Detail = { id: number; value: string };
 
 // Conversations with their channel label, contact (none for one with the organization itself),
 // the day they took place, and when and by whom they were logged (from the audit entry when
 // created_by is empty), the most recent day first; without happened_on the day they were logged
-// counts. Binds where's parameters and the limit.
+// counts. Binds where's parameters and the limit; conversationHistory adds an OFFSET.
 const conversationsSql = (where: string) => `
   SELECT conv.id, conv.contact_id, c.name AS contact_name, COALESCE(ch.label, conv.channel) AS channel, conv.note,
          conv.happened_on, a.timestamp AS logged_at, tm.name AS logged_by
