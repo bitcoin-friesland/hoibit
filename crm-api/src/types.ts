@@ -165,6 +165,10 @@ export interface UpdateContactInput {
   // as for newContact.
   phone?: string | null;
   nostr_npub?: string | null;
+  // A contact_types id; it cannot be removed.
+  type?: string;
+  // The organization the contact belongs to; null unlinks the contact from its organization.
+  organization_id?: RowId | null;
   updated_by?: RowId | null;
 }
 
@@ -175,6 +179,10 @@ export interface UpdateOrgInput {
   status?: RowId;
   website?: string | null;
   nostr_npub?: string | null;
+  // The place on OpenStreetMap, e.g. "node/123"; null removes it.
+  location_osm_id?: string | null;
+  // Replaces the organization's communities; [] removes them all.
+  community_ids?: RowId[];
   updated_by?: RowId | null;
 }
 

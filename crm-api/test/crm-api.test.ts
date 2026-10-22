@@ -967,6 +967,40 @@ describe("updateContact", () => {
     expect(await crm.updateContact({ contact_id: 9999, name: "Bob" })).toMatchObject({ ok: false, status: 404 });
     expect((await crm.contactDetails(id))!.phones).toEqual([]);
   });
+
+  it("changes the type and the organization, and unlinks the organization", async () => {
+    const id = await createAnna();
+    const org = await crm.newOrg({ name: "Cafe Satoshi", status: 2 });
+    if (!org.ok) throw new Error(org.error);
+    expect(await crm.updateContact({ contact_id: id, type: "entrepreneur", organization_id: String(org.id) })).toEqual({
+      ok: true,
+      changed: true
+    });
+    expect(await crm.contactDetails(id)).toMatchObject({
+      type: "entrepreneur",
+      organization_id: org.id,
+      organization_name: "Cafe Satoshi"
+    });
+    expect((await lastAudit("update"))!.details).toEqual({
+      fields: {
+        type: { old: "consumer", new: "entrepreneur" },
+        organization_id: { old: null, new: org.id }
+      }
+    });
+    expect(await crm.updateContact({ contact_id: id, organization_id: org.id })).toEqual({ ok: true, changed: false });
+    expect(await crm.updateContact({ contact_id: id, organization_id: null })).toEqual({ ok: true, changed: true });
+    expect(await crm.contactDetails(id)).toMatchObject({ organization_id: null, organization_name: null });
+  });
+
+  it("refuses an unknown type or organization", async () => {
+    const id = await createAnna();
+    expect(await crm.updateContact({ contact_id: id, type: "robot" })).toMatchObject({ ok: false, status: 400 });
+    expect(await crm.updateContact({ contact_id: id, organization_id: 9999 })).toMatchObject({
+      ok: false,
+      status: 404
+    });
+    expect(await crm.contactDetails(id)).toMatchObject({ type: "consumer", organization_id: null });
+  });
 });
 
 describe("updateOrg", () => {
@@ -1023,6 +1057,40 @@ describe("updateOrg", () => {
     expect(await crm.updateOrg({ organization_id: id, name: "" })).toMatchObject({ ok: false, status: 400 });
     expect(await crm.updateOrg({ organization_id: 9999, status: 2 })).toMatchObject({ ok: false, status: 404 });
     expect((await crm.organizationDetails(id))!.status).toBe(1);
+  });
+
+  it("replaces the communities and changes or removes the location", async () => {
+    const id = await createCafe();
+    await env.DB.prepare("INSERT INTO organization_communities (organization_id, community_id) VALUES (?, 1)")
+      .bind(id)
+      .run();
+    expect(
+      await crm.updateOrg({ organization_id: id, community_ids: ["3", 2, 2], location_osm_id: "node/42" })
+    ).toEqual({ ok: true, changed: true });
+    expect((await crm.organizationCommunities(id)).map(c => c.id).sort()).toEqual([2, 3]);
+    expect((await crm.organizationDetails(id))!.location_osm_id).toBe("node/42");
+    expect((await lastAudit("update"))!.details).toEqual({
+      fields: {
+        location_osm_id: { old: null, new: "node/42" },
+        community_ids: { old: [1], new: [2, 3] }
+      }
+    });
+    expect(await crm.updateOrg({ organization_id: id, community_ids: [3, 2] })).toEqual({ ok: true, changed: false });
+    expect(await crm.updateOrg({ organization_id: id, community_ids: [], location_osm_id: null })).toEqual({
+      ok: true,
+      changed: true
+    });
+    expect(await crm.organizationCommunities(id)).toEqual([]);
+    expect((await crm.organizationDetails(id))!.location_osm_id).toBeNull();
+  });
+
+  it("refuses an unknown community", async () => {
+    const id = await createCafe();
+    expect(await crm.updateOrg({ organization_id: id, community_ids: [1, 9999] })).toMatchObject({
+      ok: false,
+      status: 400
+    });
+    expect(await crm.organizationCommunities(id)).toEqual([]);
   });
 });
 
