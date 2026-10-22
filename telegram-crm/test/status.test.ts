@@ -98,16 +98,18 @@ describe("organization status", () => {
     const chat = chatAs(ADMIN);
     await chat.press(`log:${annaId}`);
     await chat.press("channel:in-person");
+    await chat.press("date:today");
     await chat.text("Will try Lightning next month");
-    expect(lastText()).toBe("✅ Conversation with Anna (Cafe Satoshi) (In Person) logged.");
+    expect(lastText()).toBe("✅ Conversation with Anna (Cafe Satoshi) (In Person, today) logged.");
     expect(lastButtons()).toEqual([{ text: "📊 Update status of Cafe Satoshi", callback_data: `status:${orgId}` }]);
 
     const bob = await crm.newContact({ name: "Bob", type: "consumer" });
     if (!bob.ok) throw new Error(bob.error);
     await chat.press(`log:${bob.id}`);
     await chat.press("channel:phone");
+    await chat.press("date:today");
     await chat.text("Asked about wallets");
-    expect(lastText()).toBe("✅ Conversation with Bob (Phone) logged.");
+    expect(lastText()).toBe("✅ Conversation with Bob (Phone, today) logged.");
     expect(lastButtons()).toEqual([]);
   });
 
