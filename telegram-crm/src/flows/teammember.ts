@@ -39,8 +39,9 @@ const shareUrl = (link: string) =>
   `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Open this link to join our team in the CRM bot.")}`;
 
 /**
- * Starts an invite: the communities of the new member, then the link. Not in a group, where
- * anyone could open the link first; there the admin gets a button to a private chat instead.
+ * Starts an invite: who it is for when there are members without access, the communities, then
+ * the link. Not in a group, where anyone could open the link first; there the admin gets a button
+ * to a private chat instead.
  */
 async function startInvite(
   sendMessage: SendMessage,
@@ -62,6 +63,46 @@ async function startInvite(
     await removeSession();
     return;
   }
+  let inactive: { id: number; name: string | null }[] = [];
+  try {
+    inactive = await env.crmApi.inactiveTeamMembers();
+  } catch (e) {
+    // An invite for someone new still works.
+    console.error("Loading members without access failed", e);
+  }
+  if (inactive.length === 0) {
+    await askInviteCommunities(sendMessage, env, chatId, session, persistSession);
+    return;
+  }
+  session.invite_member_choices = Object.fromEntries(inactive.map(m => [String(m.id), m.name ?? `#${m.id}`]));
+  setStep(session, "awaiting_invite_member");
+  await persistSession();
+  await sendMessage(
+    env,
+    chatId,
+    "Who is the invite for? People below are in the CRM without access; with this link they get it, " +
+      "with the organizations and conversations that are already theirs.",
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "➕ Someone new", callback_data: "invite_for:new" }],
+          ...inactive.map(m => [
+            { text: `👤 ${session.invite_member_choices![String(m.id)]}`, callback_data: `invite_for:${m.id}` }
+          ])
+        ]
+      }
+    }
+  );
+}
+
+// Asks which communities the invited member joins (awaiting_invite_community).
+async function askInviteCommunities(
+  sendMessage: SendMessage,
+  env: Env,
+  chatId: ChatId,
+  session: Session,
+  persistSession: () => Promise<void>
+) {
   // The admin's own communities start selected: usually the new member joins those.
   session.invite_picker = await startCommunityPicker(env, session.telegram_id, [], { selectOwn: true });
   setStep(session, "awaiting_invite_community");
@@ -88,7 +129,8 @@ async function sendInviteLink(
     res = username
       ? await env.crmApi.createInvite({
           invited_by: session.created_by ?? null,
-          community_ids: communities.map(c => c.id)
+          community_ids: communities.map(c => c.id),
+          member_id: session.invite_member_id ?? null
         })
       : undefined;
   } catch {
@@ -105,10 +147,13 @@ async function sendInviteLink(
     timeZone: "Europe/Amsterdam"
   });
   const joins = communities.length > 0 ? ` They will join ${communities.map(c => c.name).join(", ")}.` : "";
+  const forWhom = session.invite_member_id
+    ? (session.invite_member_choices?.[String(session.invite_member_id)] ?? "them")
+    : "a new team member";
   await sendMessage(
     env,
     chatId,
-    `🔗 Invite link for a new team member:\n${link}\n\nSend it only to the person you want to add.${joins} It works once, until ${until}.`,
+    `🔗 Invite link for ${forWhom}:\n${link}\n\nSend it only to the person you want to add.${joins} It works once, until ${until}.`,
     { reply_markup: { inline_keyboard: [[{ text: "📤 Share link", url: shareUrl(link) }]] } }
   );
 }
@@ -254,6 +299,17 @@ export const handleTeamMemberFlow: FlowHandler = async (
     }
     case "invite_start": {
       await startInvite(sendMessage, env, chatId, session, persistSession, removeSession);
+      break;
+    }
+    case "awaiting_invite_member": {
+      const cb = session.last_callback_data ?? "";
+      const choice = cb.startsWith("invite_for:") ? cb.slice("invite_for:".length) : undefined;
+      if (choice !== "new" && !(choice && session.invite_member_choices?.[choice])) {
+        await sendMessage(env, chatId, errorMessage("Please choose from the buttons who the invite is for."));
+        return;
+      }
+      session.invite_member_id = choice === "new" ? undefined : Number(choice);
+      await askInviteCommunities(sendMessage, env, chatId, session, persistSession);
       break;
     }
     case "awaiting_invite_community": {
