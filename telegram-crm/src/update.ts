@@ -8,6 +8,7 @@ import { handleEditFlow } from "./flows/edit";
 import { ensureCommandMenus, helpText, menuKeyboard } from "./helpers/menu";
 import { blockedList, parseUnblockData, type BlockedSender } from "./helpers/blocked";
 import { errorMessage, isErrorMessage } from "./helpers/messaging";
+import { historyPage, parseHistoryData } from "./helpers/history";
 import { parseRecordData, recordCard } from "./helpers/record";
 import { parseStatusData, setStatus, statusQuestion } from "./flows/status";
 import {
@@ -565,6 +566,21 @@ async function handleButton(
       const card = await recordCard(env, shown);
       if (card) await sendMessage(env, chatId, card.text, card.options);
       else notice = { text: "This no longer exists." };
+      return reply("OK");
+    }
+    // 📜 Conversations on a card, and ⬅️ Older below a page of them (helpers/history.ts). The
+    // pressed Older button goes, so the pages read as one list.
+    const history = parseHistoryData(data);
+    if (history) {
+      const page = await historyPage(env, history.ref, history.position);
+      if (!page) {
+        notice = { text: "This no longer exists." };
+        return reply("OK");
+      }
+      await sendMessage(env, chatId, page.text, page.options);
+      if (history.position > 0 && callback.message.message_id !== undefined) {
+        await clearKeyboard(env, chatId, callback.message.message_id);
+      }
       return reply("OK");
     }
     // 📊 Status: asks for the new status, then sets it (flows/status.ts).
