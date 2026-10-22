@@ -15,6 +15,7 @@ const DATA_TABLES = [
   "organization_wallets",
   "organization_notes",
   "organization_communities",
+  "organization_team_members",
   "contact_notes",
   "contact_phones",
   "contact_emails",
@@ -878,7 +879,14 @@ describe("organizationDetails", () => {
       website: "satoshi.cafe",
       nostr_npub: null,
       location_osm_id: null,
+      address: null,
+      category: null,
+      phone: null,
+      email: null,
+      follow_up_on: null,
       communities: [community!.name],
+      handled_by: [],
+      notes: [],
       contacts: [
         { id: anna, name: "Anna" },
         { id: bram, name: "Bram" }
@@ -1091,6 +1099,201 @@ describe("updateOrg", () => {
       status: 400
     });
     expect(await crm.organizationCommunities(id)).toEqual([]);
+  });
+});
+
+describe("organization details from Baserow", () => {
+  it("stores address, category, phone, email, follow-up day and handlers of a new organization", async () => {
+    const adminId = await createFirstUser();
+    const bobId = await addMember(adminId, "2001", "Bob");
+    const res = await crm.newOrg({
+      name: "Smuk Espressobar",
+      status: 7,
+      address: "Kleinzand 1, Sneek",
+      category: "Restaurant - Lunch",
+      phone: "+31 515 123 456",
+      email: "info@smuk.nl",
+      follow_up_on: "2027-01-12",
+      team_member_ids: [bobId, adminId, bobId],
+      created_by: adminId
+    });
+    if (!res.ok) throw new Error(res.error);
+    expect(await crm.organizationDetails(res.id)).toMatchObject({
+      status_label: "Hesitant",
+      address: "Kleinzand 1, Sneek",
+      category: "Restaurant - Lunch",
+      phone: "+31515123456",
+      email: "info@smuk.nl",
+      follow_up_on: "2027-01-12",
+      handled_by: [
+        { id: adminId, name: "Admin", telegram_id: "1001" },
+        { id: bobId, name: "Bob", telegram_id: "2001" }
+      ]
+    });
+    expect((await lastAudit("insert")).details.fields).toMatchObject({
+      phone: { old: null, new: "+31515123456" },
+      follow_up_on: { old: null, new: "2027-01-12" },
+      team_member_ids: { old: null, new: [adminId, bobId] }
+    });
+  });
+
+  it("refuses a national phone number or an invalid follow-up day, also for a new organization of a contact", async () => {
+    expect(await crm.newOrg({ name: "A", status: 1, phone: "0515123456" })).toMatchObject({ ok: false, status: 400 });
+    expect(await crm.newOrg({ name: "A", status: 1, follow_up_on: "2027-02-30" })).toMatchObject({
+      ok: false,
+      status: 400,
+      error: "Invalid follow_up_on"
+    });
+    expect(
+      await crm.newContact({
+        name: "Anna",
+        type: "entrepreneur",
+        new_organization: { name: "A", status: 1, follow_up_on: "12-01-2027" }
+      })
+    ).toMatchObject({ ok: false, status: 400 });
+    const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM organizations").first();
+    expect(count).toEqual({ n: 0 });
+  });
+
+  it("changes the details and replaces the handlers, only with team members who have access", async () => {
+    const adminId = await createFirstUser();
+    const bobId = await addMember(adminId, "2001", "Bob");
+    const org = await crm.newOrg({ name: "Cafe", status: 1, team_member_ids: [adminId] });
+    if (!org.ok) throw new Error(org.error);
+    expect(
+      await crm.updateOrg({
+        organization_id: org.id,
+        address: "Grootzand 2, Sneek",
+        phone: "0031 6 1234 5678",
+        follow_up_on: "2027-03-01",
+        team_member_ids: [bobId],
+        updated_by: adminId
+      })
+    ).toEqual({ ok: true, changed: true });
+    expect((await lastAudit("update")).details.fields).toEqual({
+      address: { old: null, new: "Grootzand 2, Sneek" },
+      phone: { old: null, new: "+31612345678" },
+      follow_up_on: { old: null, new: "2027-03-01" },
+      team_member_ids: { old: [adminId], new: [bobId] }
+    });
+    expect(await crm.updateOrg({ organization_id: org.id, team_member_ids: [9999] })).toMatchObject({
+      ok: false,
+      status: 400,
+      error: "Unknown team member"
+    });
+    expect(await crm.updateOrg({ organization_id: org.id, phone: "06 1234 5678" })).toMatchObject({
+      ok: false,
+      status: 400
+    });
+    expect(await crm.updateOrg({ organization_id: org.id, follow_up_on: null, phone: "" })).toEqual({
+      ok: true,
+      changed: true
+    });
+    expect(await crm.organizationDetails(org.id)).toMatchObject({
+      follow_up_on: null,
+      phone: null,
+      handled_by: [{ id: bobId, name: "Bob" }]
+    });
+  });
+
+  it("shows notes, and conversations with the organization itself next to those with its contacts", async () => {
+    const adminId = await createFirstUser();
+    const org = await crm.newOrg({ name: "Cafe", status: 1 });
+    if (!org.ok) throw new Error(org.error);
+    const anna = await crm.newContact({ name: "Anna", type: "entrepreneur", organization_id: org.id });
+    if (!anna.ok) throw new Error(anna.error);
+    await env.DB.prepare("INSERT INTO organization_notes (organization_id, note) VALUES (?, ?), (?, ?)")
+      .bind(org.id, "First note", org.id, "Second note")
+      .run();
+    await crm.logConversation({ contact_id: anna.id, channel: "phone", happened_on: "2026-10-01" });
+    const res = await crm.logConversation({
+      organization_id: org.id,
+      channel: "in-person",
+      note: "Spoke to staff",
+      happened_on: "2026-10-05",
+      created_by: adminId
+    });
+    if (!res.ok) throw new Error(res.error);
+    expect((await lastAudit("insert")).details.fields.organization_id).toEqual({ old: null, new: org.id });
+    const details = await crm.organizationDetails(org.id);
+    expect(details!.notes).toEqual(["First note", "Second note"]);
+    expect(details!.conversations).toMatchObject([
+      { contact_id: null, contact_name: null, note: "Spoke to staff", logged_by: "Admin" },
+      { contact_id: anna.id, contact_name: "Anna" }
+    ]);
+    expect((await crm.contactDetails(anna.id))!.conversations).toHaveLength(1);
+  });
+
+  it("refuses a conversation with both, neither or an unknown organization", async () => {
+    const org = await crm.newOrg({ name: "Cafe", status: 1 });
+    const anna = await crm.newContact({ name: "Anna", type: "consumer" });
+    if (!org.ok || !anna.ok) throw new Error("setup failed");
+    for (const [input, status] of [
+      [{ contact_id: anna.id, organization_id: org.id }, 400],
+      [{}, 400],
+      [{ organization_id: 9999 }, 404]
+    ] as const) {
+      expect(await crm.logConversation({ ...input, channel: "phone" })).toMatchObject({ ok: false, status });
+    }
+  });
+
+  it("lists follow-ups up to a day, the earliest first, mine and those nobody handles", async () => {
+    const adminId = await createFirstUser();
+    const bobId = await addMember(adminId, "2001", "Bob");
+    const add = async (name: string, follow_up_on: string | null, team_member_ids: number[]) => {
+      const res = await crm.newOrg({ name, status: 1, follow_up_on, team_member_ids });
+      if (!res.ok) throw new Error(res.error);
+      return res.id;
+    };
+    await add("Later", "2027-05-01", [adminId]);
+    const bobs = await add("Bob's", "2026-11-02", [bobId]);
+    const mine = await add("Mine", "2026-11-03", [adminId]);
+    const nobody = await add("Nobody", "2026-11-01", []);
+    await add("No day", null, [adminId]);
+
+    const all = await crm.followUps({ until: "2026-12-31" });
+    if (!all.ok) throw new Error(all.error);
+    expect(all.follow_ups.map(f => f.id)).toEqual([nobody, bobs, mine]);
+    expect(await crm.followUps({ until: "2026-12-31", team_member_id: adminId })).toEqual({
+      ok: true,
+      follow_ups: [
+        {
+          id: nobody,
+          name: "Nobody",
+          follow_up_on: "2026-11-01",
+          status_label: "Curious about Bitcoin",
+          handled_by: []
+        },
+        {
+          id: mine,
+          name: "Mine",
+          follow_up_on: "2026-11-03",
+          status_label: "Curious about Bitcoin",
+          handled_by: [{ id: adminId, name: "Admin", telegram_id: "1001" }]
+        }
+      ]
+    });
+    expect(await crm.followUps({ until: "31-12-2026" })).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it("stops a removed team member handling organizations", async () => {
+    const adminId = await createFirstUser();
+    const bobId = await addMember(adminId, "2001", "Bob");
+    const carlaId = await addMember(adminId, "3001", "Carla");
+    const org = await crm.newOrg({ name: "Cafe", status: 1, team_member_ids: [bobId, carlaId] });
+    if (!org.ok) throw new Error(org.error);
+    // Bob has history (he joined with an invite) and is deactivated; Carla too.
+    await crm.deleteTeamMember({ telegram_id: "2001", performed_by: adminId });
+    expect((await lastAudit("update")).details.fields.handled_organization_ids).toEqual({ old: [org.id], new: [] });
+    expect((await crm.organizationDetails(org.id))!.handled_by.map(h => h.name)).toEqual(["Carla"]);
+    // A member without any history is deleted, which the handler row must not block.
+    await env.DB.prepare("DELETE FROM team_invites").run();
+    await env.DB.prepare("DELETE FROM audit_log WHERE performed_by = ?").bind(carlaId).run();
+    expect(await crm.deleteTeamMember({ telegram_id: "3001", performed_by: adminId })).toEqual({
+      ok: true,
+      deactivated: false
+    });
+    expect((await crm.organizationDetails(org.id))!.handled_by).toEqual([]);
   });
 });
 
