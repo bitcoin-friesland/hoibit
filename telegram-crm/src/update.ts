@@ -2,6 +2,7 @@ import { handleContactFlow } from "./flows/contact";
 import { handleNewOrgFlow } from "./flows/org";
 import { handleConversationFlow } from "./flows/conversation";
 import { handleTeamMemberFlow } from "./flows/teammember";
+import { handleMeFlow } from "./flows/me";
 import { handleFindFlow } from "./flows/find";
 import { handleEditFlow } from "./flows/edit";
 import { ensureCommandMenus, helpText, menuKeyboard } from "./helpers/menu";
@@ -40,7 +41,8 @@ const FLOWS: Record<NonNullable<Session["mode"]>, FlowHandler> = {
   conversation: handleConversationFlow,
   teammember: handleTeamMemberFlow,
   find: handleFindFlow,
-  edit: handleEditFlow
+  edit: handleEditFlow,
+  me: handleMeFlow
 };
 
 const SOMETHING_WENT_WRONG = "Something went wrong. Please try again later.";
@@ -80,7 +82,8 @@ const FLOW_COMMANDS: Record<NonNullable<Session["mode"]>, string> = {
   conversation: "/logconversation",
   teammember: "/teammember",
   find: "/find",
-  edit: "edit"
+  edit: "edit",
+  me: "/me"
 };
 
 const CANCEL_BUTTON = { text: "✖️ Cancel", callback_data: "cancel" };
@@ -418,6 +421,9 @@ async function startCommandFlow(env: Env, store: SessionStore, actor: Actor, com
     case "find":
       // The first step searches for the name typed after /find, or asks for one.
       await startFlow(env, store, actor, { step: "find_start", mode: "find", query: args, ...owner });
+      return true;
+    case "me":
+      await startFlow(env, store, actor, { step: "me_start", mode: "me", ...owner });
       return true;
     case "blocked": {
       if (actor.member.is_admin !== 1) {

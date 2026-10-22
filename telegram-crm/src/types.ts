@@ -33,7 +33,7 @@ export type UserId = number | string;
  * has their own flow. Each flow uses its own subset of the optional fields.
  */
 export interface Session {
-  mode?: "contact" | "org" | "conversation" | "teammember" | "find" | "edit";
+  mode?: "contact" | "org" | "conversation" | "teammember" | "find" | "edit" | "me";
   step?: string;
   // Telegram user id of the user running the flow
   telegram_id?: string;
