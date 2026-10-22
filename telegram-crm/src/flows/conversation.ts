@@ -3,6 +3,7 @@ import { setStep } from "../helpers/session";
 import { dayLabel, parseDay, teamDay } from "../helpers/day";
 import { errorMessage, successMessage } from "../helpers/messaging";
 import { handleContactFlow } from "./contact";
+import { followUpButton } from "./followup";
 import { statusButton } from "./status";
 import type { ChatId, FlowHandler, SendMessage, SendOptions, Session } from "../types";
 
@@ -16,14 +17,17 @@ const DAY_PROMPT = "Type the date, like 14-10 or 14-10-2026.";
 const contactLabel = (c: { name: string; organization_name: string | null }) =>
   c.organization_name ? `${c.name} (${c.organization_name})` : c.name;
 
-// The contact is chosen: asks how the conversation went (awaiting_channel).
+// Who the conversation was with: a contact, or an organization itself (staff, nobody by name).
+type Talker = { contactId: number } | { organizationId: number };
+
+// The contact or organization is chosen: asks how the conversation went (awaiting_channel).
 async function askChannel(
   sendMessage: SendMessage,
   env: Env,
   chatId: ChatId,
   session: Session,
   persistSession: () => Promise<void>,
-  contactId: number,
+  talker: Talker,
   label: string
 ) {
   let channels;
@@ -34,7 +38,13 @@ async function askChannel(
     await sendMessage(env, chatId, errorMessage("Something went wrong. Please choose the contact again."));
     return;
   }
-  session.contact_id = contactId;
+  if ("contactId" in talker) {
+    session.contact_id = talker.contactId;
+    session.organization_id = undefined;
+  } else {
+    session.contact_id = undefined;
+    session.organization_id = talker.organizationId;
+  }
   session.contact_label = label;
   session.channel_choices = Object.fromEntries(channels.map(c => [c.id, c.label]));
   setStep(session, "awaiting_channel");
@@ -44,18 +54,33 @@ async function askChannel(
   });
 }
 
-// After a conversation with an entrepreneur: a button to update their organization's status,
-// which such a conversation often changes. Nothing when it cannot be looked up.
-async function statusFollowUp(env: Env, contactId: number): Promise<SendOptions | undefined> {
+// After a conversation with an organization or one of its entrepreneurs: buttons to update the
+// organization's status and follow-up day, which such a conversation often changes. Nothing when
+// it cannot be looked up.
+async function organizationButtons(env: Env, session: Session): Promise<SendOptions | undefined> {
+  let org: { id: number; name: string } | undefined;
   try {
-    const contact = await env.crmApi.contactDetails(contactId, 0);
-    if (contact?.type !== "entrepreneur" || !contact.organization_id) return undefined;
-    const text = `📊 Update status of ${contact.organization_name}`;
-    return { reply_markup: { inline_keyboard: [[statusButton(contact.organization_id, text)]] } };
+    if (session.organization_id) {
+      const details = await env.crmApi.organizationDetails(session.organization_id, 0);
+      if (details) org = { id: details.id, name: details.name };
+    } else {
+      const contact = await env.crmApi.contactDetails(session.contact_id ?? 0, 0);
+      if (contact?.type === "entrepreneur" && contact.organization_id && contact.organization_name) {
+        org = { id: contact.organization_id, name: contact.organization_name };
+      }
+    }
   } catch (e) {
-    console.error("Loading a contact for the status button failed", e);
-    return undefined;
+    console.error("Loading an organization for the status button failed", e);
   }
+  if (!org) return undefined;
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [statusButton(org.id, `📊 Update status of ${org.name}`)],
+        [followUpButton(org.id, `⏰ Set follow-up of ${org.name}`)]
+      ]
+    }
+  };
 }
 
 // Steps: search and pick a contact, pick a channel, pick the day, write the note, save.
@@ -108,7 +133,34 @@ export const handleConversationFlow: FlowHandler = async (
         await removeSession();
         return;
       }
-      await askChannel(sendMessage, env, chatId, session, persistSession, contact.id, contactLabel(contact));
+      await askChannel(
+        sendMessage,
+        env,
+        chatId,
+        session,
+        persistSession,
+        { contactId: contact.id },
+        contactLabel(contact)
+      );
+      break;
+    }
+    case "log_organization": {
+      // Started from 💬 Log conversation on an organization's card: with the organization itself.
+      let org;
+      try {
+        org = await env.crmApi.organizationDetails(session.organization_id ?? 0, 0);
+      } catch (e) {
+        console.error("Loading an organization failed", e);
+        await sendMessage(env, chatId, errorMessage("Something went wrong. Please try again."));
+        await removeSession();
+        return;
+      }
+      if (!org) {
+        await sendMessage(env, chatId, errorMessage("This organization no longer exists."));
+        await removeSession();
+        return;
+      }
+      await askChannel(sendMessage, env, chatId, session, persistSession, { organizationId: org.id }, org.name);
       break;
     }
     case "awaiting_contact": {
@@ -136,7 +188,7 @@ export const handleConversationFlow: FlowHandler = async (
           await sendMessage(env, chatId, errorMessage("Please choose a contact from the buttons, or type a name."));
           return;
         }
-        await askChannel(sendMessage, env, chatId, session, persistSession, Number(contactId), label);
+        await askChannel(sendMessage, env, chatId, session, persistSession, { contactId: Number(contactId) }, label);
         return;
       }
       const name = text && text.trim();
@@ -241,7 +293,9 @@ export const handleConversationFlow: FlowHandler = async (
       try {
         // created_by is the team member id (team_members.id) of the user, not the Telegram user id.
         const res = await env.crmApi.logConversation({
-          contact_id: session.contact_id ?? 0,
+          ...(session.organization_id
+            ? { organization_id: session.organization_id }
+            : { contact_id: session.contact_id ?? 0 }),
           channel: session.channel ?? "",
           note,
           happened_on: session.happened_on ?? null,
@@ -267,7 +321,7 @@ export const handleConversationFlow: FlowHandler = async (
         successMessage(
           `Conversation with ${session.contact_label} (${[channelLabel, session.happened_on && dayLabel(session.happened_on)].filter(Boolean).join(", ")}) logged.`
         ),
-        await statusFollowUp(env, session.contact_id ?? 0)
+        await organizationButtons(env, session)
       );
       await removeSession();
       break;

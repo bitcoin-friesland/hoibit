@@ -33,7 +33,7 @@ export type UserId = number | string;
  * has their own flow. Each flow uses its own subset of the optional fields.
  */
 export interface Session {
-  mode?: "contact" | "org" | "conversation" | "teammember" | "find" | "edit" | "me";
+  mode?: "contact" | "org" | "conversation" | "teammember" | "find" | "edit" | "me" | "followup";
   step?: string;
   // Telegram user id of the user running the flow
   telegram_id?: string;
@@ -66,6 +66,17 @@ export interface Session {
   organization_status?: string;
   organization_website?: string | null;
   organization_nostr_npub?: string | null;
+  // an organization's own details (edit flow); organization_follow_up_on is "YYYY-MM-DD"
+  organization_address?: string | null;
+  organization_category?: string | null;
+  organization_phone?: string | null;
+  organization_email?: string | null;
+  organization_follow_up_on?: string | null;
+  // the team members who handle the organization (edit flow), and while picking them: the
+  // members to choose from (id -> name) and the ones ticked so far
+  handler_ids?: number[];
+  handler_choices?: Record<string, string>;
+  handler_picked?: number[];
   org_picker?: CommunityPicker;
   organization_communities?: PickedCommunity[];
   osm_options?: string[];

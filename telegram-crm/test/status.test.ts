@@ -47,7 +47,11 @@ describe("organization status", () => {
     await chat.press(`status:${orgId}`);
     expect(lastText()).toBe('What is the Bitcoin status of "Cafe Satoshi"? It is now: Curious about Bitcoin.');
     expect(lastButtons()).toEqual([
+      { text: "To visit", callback_data: `status:${orgId}:5` },
+      { text: "Talked to staff, not owner", callback_data: `status:${orgId}:6` },
       { text: "✓ Curious about Bitcoin", callback_data: `status:${orgId}:1` },
+      { text: "Hesitant", callback_data: `status:${orgId}:7` },
+      { text: "Interested later", callback_data: `status:${orgId}:8` },
       { text: "Accepts Bitcoin", callback_data: `status:${orgId}:2` },
       { text: "Not Interested", callback_data: `status:${orgId}:3` },
       { text: "Stopped Accepting Bitcoin", callback_data: `status:${orgId}:4` }
@@ -101,7 +105,10 @@ describe("organization status", () => {
     await chat.press("date:today");
     await chat.text("Will try Lightning next month");
     expect(lastText()).toBe("✅ Conversation with Anna (Cafe Satoshi) (In Person, today) logged.");
-    expect(lastButtons()).toEqual([{ text: "📊 Update status of Cafe Satoshi", callback_data: `status:${orgId}` }]);
+    expect(lastButtons()).toEqual([
+      { text: "📊 Update status of Cafe Satoshi", callback_data: `status:${orgId}` },
+      { text: "⏰ Set follow-up of Cafe Satoshi", callback_data: `fu:${orgId}` }
+    ]);
 
     const bob = await crm.newContact({ name: "Bob", type: "consumer" });
     if (!bob.ok) throw new Error(bob.error);
