@@ -80,6 +80,18 @@ function inviteToken() {
 // Telegram usernames are letters, digits and underscores; collectible ones can be short.
 const TELEGRAM_USERNAME = /^[A-Za-z0-9_]{1,32}$/;
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Whether day is a real calendar day ("YYYY-MM-DD") that is not in the future. It is a day in
+// the team member's time zone, which can already be tomorrow in UTC, so one day of slack.
+function isPastDay(day: string): boolean {
+  if (!/^\d{4}-\d\d-\d\d$/.test(day)) return false;
+  const time = Date.parse(`${day}T00:00:00Z`);
+  // Date.parse rolls "2026-02-30" over to March; the round trip catches that.
+  if (Number.isNaN(time) || new Date(time).toISOString().slice(0, 10) !== day) return false;
+  return time <= Date.now() + DAY_MS;
+}
+
 /**
  * The phone number in international (E.164) form, e.g. "+31612345678", or undefined when it is
  * not one. Contact phones are stored like this, so OpenStreetMap lookups and comparisons see one
@@ -326,10 +338,12 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
   }
 
   // Changes name and/or time zone, and replaces the communities when community_ids is given.
+  // Members change their own (/me); only admins change someone else's.
   async updateTeamMember(data: UpdateTeamMemberInput): Promise<Result> {
     if (!data.team_member_id) return refuse(400, "Missing team_member_id");
-    if (!(await this.isAdmin(data.updated_by))) return refuse(403, "Only admins can update team members");
     const memberId = toInt(data.team_member_id);
+    const self = !!data.updated_by && toInt(data.updated_by) === memberId;
+    if (!self && !(await this.isAdmin(data.updated_by))) return refuse(403, "Only admins can update team members");
     const oldMember = await this.db
       .prepare(`SELECT name, time_zone FROM team_members WHERE id = ?`)
       .bind(memberId)
@@ -998,12 +1012,16 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       .first<{ contact: 0 | 1; channel: 0 | 1 }>();
     if (!known?.contact) return refuse(404, "Contact not found");
     if (!known.channel) return refuse(400, "Unknown channel");
+    const happenedOn = data.happened_on || null;
+    if (happenedOn && !isPastDay(happenedOn)) return refuse(400, "Invalid happened_on");
     const createdBy = toIntOrNull(data.created_by);
     const note = data.note || null;
     const results = await this.db.batch([
       this.db
-        .prepare(`INSERT INTO conversations (contact_id, channel, note, created_by) VALUES (?, ?, ?, ?)`)
-        .bind(contactId, data.channel, note, createdBy),
+        .prepare(
+          `INSERT INTO conversations (contact_id, channel, note, happened_on, created_by) VALUES (?, ?, ?, ?, ?)`
+        )
+        .bind(contactId, data.channel, note, happenedOn, createdBy),
       this.db.prepare(auditSql(insertedIdText("conversations"))).bind(
         "insert",
         "conversations",
@@ -1012,7 +1030,8 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
           fields: {
             contact_id: created(contactId),
             channel: created(data.channel),
-            ...(note ? { note: created(note) } : {})
+            ...(note ? { note: created(note) } : {}),
+            ...(happenedOn ? { happened_on: created(happenedOn) } : {})
           }
         })
       ),
@@ -1025,12 +1044,12 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
 // The first email address or phone number of a contact.
 type Detail = { id: number; value: string };
 
-// Conversations with their channel label, contact, and when and by whom they were logged (from
-// the audit entry when created_by is empty), the most recent first. Binds where's parameters and
-// the limit.
+// Conversations with their channel label, contact, the day they took place, and when and by whom
+// they were logged (from the audit entry when created_by is empty), the most recent day first;
+// without happened_on the day they were logged counts. Binds where's parameters and the limit.
 const conversationsSql = (where: string) => `
   SELECT conv.id, conv.contact_id, c.name AS contact_name, COALESCE(ch.label, conv.channel) AS channel, conv.note,
-         a.timestamp AS logged_at, tm.name AS logged_by
+         conv.happened_on, a.timestamp AS logged_at, tm.name AS logged_by
   FROM conversations conv
   JOIN contacts c ON c.id = conv.contact_id
   LEFT JOIN channels ch ON ch.id = conv.channel
@@ -1038,7 +1057,7 @@ const conversationsSql = (where: string) => `
     ON a.table_name = 'conversations' AND a.action = 'insert' AND a.record_id = CAST(conv.id AS TEXT)
   LEFT JOIN team_members tm ON tm.id = COALESCE(conv.created_by, a.performed_by)
   WHERE ${where}
-  ORDER BY conv.id DESC
+  ORDER BY COALESCE(conv.happened_on, date(a.timestamp)) DESC, conv.id DESC
   LIMIT ?`;
 
 // The first row of the batch's last statement.

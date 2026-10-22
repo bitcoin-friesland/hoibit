@@ -149,6 +149,8 @@ export interface LogConversationInput {
   contact_id: RowId;
   channel: string;
   note?: string | null;
+  // The day it took place, "YYYY-MM-DD" in the team member's time zone; not in the future.
+  happened_on?: string | null;
   created_by?: RowId | null;
 }
 
@@ -183,6 +185,8 @@ export interface ConversationSummary {
   // The channel's label, e.g. "In Person".
   channel: string;
   note: string | null;
+  // The day it took place, "YYYY-MM-DD"; null for conversations logged before this was asked.
+  happened_on: string | null;
   // When it was logged, "YYYY-MM-DD HH:MM:SS" in UTC; null when that is not known.
   logged_at: string | null;
   // The name of the team member who logged it; null when that is not known.
