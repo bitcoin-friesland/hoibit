@@ -5,7 +5,9 @@
  * (session.edit_target, see flows/edit.ts) uses the same card, with the name as a detail too.
  *
  * Steps: awaiting_card (a button of the card) and awaiting_card_field (the value of the tapped
- * detail, or Back / Remove). Saving is up to the flow: handleCardStep calls onSave.
+ * detail, or Back / Remove). Saving is up to the flow: handleCardStep calls onSave. A flow can add
+ * actions: details that take more than one typed value (a choice, a search), which it asks for
+ * itself when their button (card:<key>) is tapped.
  */
 import { errorMessage } from "./messaging";
 import { setStep } from "./session";
@@ -124,17 +126,29 @@ const isField = (key: string | undefined): key is FieldKey => !!key && key in FI
 // Lines that describe the card's subject apart from the optional details; set by the flow.
 export type CardHeader = (session: Session) => string[];
 
-function cardText(session: Session, header: CardHeader) {
-  const details = fieldsOf(session).map(key => `${labelOf(session, key)}: ${session[key] || "—"}`);
-  const hint = session.edit_target ? "Tap a detail to change it, then Save." : "Tap a detail to add it, or Save.";
-  return [...header(session), "", ...details, "", hint].join("\n");
+// A detail the flow asks for itself: its button is card:<key>, line shows it on the card.
+export interface CardAction {
+  key: string;
+  button: string;
+  line: string;
 }
 
-function cardKeyboard(session: Session): InlineKeyboardButton[][] {
-  const fields = fieldsOf(session).map(key => ({
-    text: plainNostr(session, key) ? FIELDS.nostr_npub.button : FIELDS[key].button,
-    callback_data: `card:${key}`
-  }));
+export type CardActions = (session: Session) => CardAction[];
+
+function cardText(session: Session, header: CardHeader, actions: CardAction[]) {
+  const details = fieldsOf(session).map(key => `${labelOf(session, key)}: ${session[key] || "—"}`);
+  const hint = session.edit_target ? "Tap a detail to change it, then Save." : "Tap a detail to add it, or Save.";
+  return [...header(session), "", ...details, ...actions.map(a => a.line), "", hint].join("\n");
+}
+
+function cardKeyboard(session: Session, actions: CardAction[]): InlineKeyboardButton[][] {
+  const fields = [
+    ...fieldsOf(session).map(key => ({
+      text: plainNostr(session, key) ? FIELDS.nostr_npub.button : FIELDS[key].button,
+      callback_data: `card:${key}`
+    })),
+    ...actions.map(a => ({ text: a.button, callback_data: `card:${a.key}` }))
+  ];
   const rows: InlineKeyboardButton[][] = [];
   for (let i = 0; i < fields.length; i += 3) rows.push(fields.slice(i, i + 3));
   rows.push([{ text: "✅ Save", callback_data: "card:save" }]);
@@ -148,20 +162,25 @@ export async function showCard(
   chatId: ChatId,
   session: Session,
   persistSession: () => Promise<void>,
-  header: CardHeader
+  header: CardHeader,
+  actions: CardActions = () => []
 ) {
   session.card_field = undefined;
   setStep(session, "awaiting_card");
   await persistSession();
-  await sendMessage(env, chatId, cardText(session, header), {
-    reply_markup: { inline_keyboard: cardKeyboard(session) }
+  const shown = actions(session);
+  await sendMessage(env, chatId, cardText(session, header, shown), {
+    reply_markup: { inline_keyboard: cardKeyboard(session, shown) },
+    // A location is shown as a link to the map.
+    link_preview_options: { is_disabled: true }
   });
 }
 
 /**
  * Handles the update when session.step is a card step; returns false (and does nothing) for any
- * other step. onSave runs when Save is tapped; on a failure it reports an error and leaves the
- * card in place, so Save can be tapped again.
+ * other step, and for the button of one of actions, which the flow handles. onSave runs when Save
+ * is tapped; on a failure it reports an error and leaves the card in place, so Save can be tapped
+ * again.
  */
 export async function handleCardStep(
   sendMessage: SendMessage,
@@ -171,11 +190,13 @@ export async function handleCardStep(
   session: Session,
   persistSession: () => Promise<void>,
   header: CardHeader,
-  onSave: () => Promise<void>
+  onSave: () => Promise<void>,
+  actions: CardActions = () => []
 ): Promise<boolean> {
   const cb = session.last_callback_data;
   if (session.step === "awaiting_card") {
     const key = cb?.startsWith("card:") ? cb.slice("card:".length) : undefined;
+    if (actions(session).some(a => a.key === key)) return false;
     if (key === "save") {
       await onSave();
     } else if (isField(key) && fieldsOf(session).includes(key)) {
@@ -196,7 +217,7 @@ export async function handleCardStep(
   if (session.step === "awaiting_card_field") {
     const key = session.card_field;
     if (!isField(key)) {
-      await showCard(sendMessage, env, chatId, session, persistSession, header);
+      await showCard(sendMessage, env, chatId, session, persistSession, header, actions);
       return true;
     }
     if (text === undefined) {
@@ -213,7 +234,7 @@ export async function handleCardStep(
       }
       setField(session, key, parsed.value);
     }
-    await showCard(sendMessage, env, chatId, session, persistSession, header);
+    await showCard(sendMessage, env, chatId, session, persistSession, header, actions);
     return true;
   }
   return false;

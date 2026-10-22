@@ -13,7 +13,8 @@ import {
 import { setStep } from "../helpers/session";
 import { errorMessage, promptWithOptions } from "../helpers/messaging";
 import { ORG_MAX_RESULTS, handleOrganizationStep, showRecordCard, startOrganizationSteps } from "./organization";
-import type { ChatId, FlowHandler, SendMessage, Session } from "../types";
+import type { OrganizationSearchRow } from "../../../crm-api/src/types";
+import type { ChatId, FlowHandler, InlineKeyboardButton, SendMessage, Session } from "../types";
 
 // Existing contacts shown when the new name resembles theirs.
 const SIMILAR_MAX_RESULTS = 5;
@@ -37,13 +38,20 @@ async function askType(
 }
 
 // The community of the team member, so organizations there are listed first.
-async function ownCommunityId(env: Env, session: Session) {
+export async function ownCommunityId(env: Env, session: Session) {
   try {
     return (await env.crmApi.teamMemberCommunities(session.telegram_id ?? ""))[0]?.id ?? null;
   } catch {
     return null;
   }
 }
+
+// A button per organization found (select_org:<id>); the place tells same names apart.
+export const organizationButtons = (orgs: OrganizationSearchRow[]): InlineKeyboardButton[][] =>
+  orgs.map(o => {
+    const place = o.region || o.community_name;
+    return [{ text: place ? `${o.name} · ${place}` : o.name, callback_data: `select_org:${o.id}` }];
+  });
 
 const NAME_PROMPT = "What is the contact name?";
 
@@ -191,11 +199,7 @@ export const handleContactFlow: FlowHandler = async (
       session.org_choices = Object.fromEntries(orgs.map(o => [String(o.id), o.name]));
       await persistSession();
       if (orgs.length > 0) {
-        // The place tells organizations with the same name apart.
-        const keyboard = orgs.map(o => {
-          const place = o.region || o.community_name;
-          return [{ text: place ? `${o.name} · ${place}` : o.name, callback_data: `select_org:${o.id}` }];
-        });
+        const keyboard = organizationButtons(orgs);
         keyboard.push([{ text: `Create new "${org}"`, callback_data: "create_org" }]);
         const more =
           found.length > orgs.length

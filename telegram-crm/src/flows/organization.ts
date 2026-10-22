@@ -28,7 +28,7 @@ export const ORG_STATUSES: Record<string, { id: number; label: string }> = {
   "stopped-accepting": { id: 4, label: "Stopped Accepting Bitcoin" }
 };
 
-const ORG_PICKER_TITLE = "Select Bitcoin communities for this organization:";
+export const ORG_PICKER_TITLE = "Select Bitcoin communities for this organization:";
 
 const OSM_TYPE_KEYS = "shop amenity office craft industrial tourism leisure healthcare religion farm landuse".split(
   " "
@@ -203,8 +203,66 @@ function osmItem(item: OsmResult, number: number) {
   ].join("\n");
 }
 
+// "Cafe Satoshi – Nieuwestad 1, Leeuwarden", for buttons and the overview card.
+export function osmLabel(item: OsmResult) {
+  const place = osmPlace(item);
+  return `${osmName(item)}${place ? ` – ${place}` : ""}`;
+}
+
+/**
+ * The places OpenStreetMap has for the organization in the session (session.osm_name, or else its
+ * name), in the regions of its communities. Empty when nothing is found or the search fails.
+ */
+export async function searchOsmPlaces(env: Env, chatId: ChatId, session: Session): Promise<OsmResult[]> {
+  const regions = (session.organization_communities || []).map(c => c.region).filter((r): r is string => !!r);
+  // The search takes a few seconds; Telegram shows "typing…" meanwhile.
+  await callTelegram(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+  try {
+    // One lookup for all regions: it deduplicates the results and spaces the Nominatim requests.
+    const results = await findOsmNodeForOrganization({
+      name: session.osm_name || session.organization || "",
+      regions,
+      phone: session.phone,
+      website: session.organization_website,
+      email: session.email
+    });
+    return results.filter(item => item && item.id).slice(0, OSM_MAX_RESULTS);
+  } catch {
+    return [];
+  }
+}
+
+// Asks which of results the organization is, with a button per place (osmnode:<id>) above more.
+export async function askOsmPlace(
+  sendMessage: SendMessage,
+  env: Env,
+  chatId: ChatId,
+  session: Session,
+  results: OsmResult[],
+  more: InlineKeyboardButton[][]
+) {
+  const name = session.osm_name || session.organization || "";
+  if (results.length === 0) {
+    await sendMessage(env, chatId, `Nothing found on OpenStreetMap for "${name}".`, {
+      reply_markup: { inline_keyboard: more }
+    });
+    return;
+  }
+  const keyboard = results.map((item, i) => [
+    { text: clip(`${i + 1}. ${osmLabel(item)}`, 64), callback_data: `osmnode:${item.id}` }
+  ]);
+  const items = results.map((item, i) => osmItem(item, i + 1)).join("\n\n");
+  await sendMessage(env, chatId, `Which place on OpenStreetMap is "${escapeHtml(name)}"?\n\n${items}`, {
+    reply_markup: { inline_keyboard: [...keyboard, ...more] },
+    parse_mode: "HTML",
+    link_preview_options: { is_disabled: true }
+  });
+}
+
+export const OSM_SEARCH_BUTTON: InlineKeyboardButton = { text: "🔍 Search another name", callback_data: "osm:search" };
+
 const OSM_MORE_BUTTONS: InlineKeyboardButton[][] = [
-  [{ text: "🔍 Search another name", callback_data: "osm:search" }],
+  [OSM_SEARCH_BUTTON],
   [{ text: "None of these", callback_data: "osmnode:none" }]
 ];
 
@@ -220,24 +278,7 @@ async function lookupOsmAndContinue(
   persistSession: () => Promise<void>,
   removeSession: () => Promise<void>
 ) {
-  const regions = (session.organization_communities || []).map(c => c.region).filter((r): r is string => !!r);
-  const name = session.osm_name || session.organization || "";
-  // The search takes a few seconds; Telegram shows "typing…" meanwhile.
-  await callTelegram(env, "sendChatAction", { chat_id: chatId, action: "typing" });
-  let results: OsmResult[] = [];
-  try {
-    // One lookup for all regions: it deduplicates the results and spaces the Nominatim requests.
-    results = await findOsmNodeForOrganization({
-      name,
-      regions,
-      phone: session.phone,
-      website: session.organization_website,
-      email: session.email
-    });
-  } catch {
-    results = [];
-  }
-  results = results.filter(item => item && item.id).slice(0, OSM_MAX_RESULTS);
+  const results = await searchOsmPlaces(env, chatId, session);
   if (results.length === 0 && !session.osm_name) {
     await save(sendMessage, env, chatId, session, removeSession, null, true);
     return;
@@ -245,23 +286,7 @@ async function lookupOsmAndContinue(
   session.osm_options = results.map(item => item.id);
   setStep(session, "awaiting_osm_node");
   await persistSession();
-  if (results.length === 0) {
-    await sendMessage(env, chatId, `Nothing found on OpenStreetMap for "${name}".`, {
-      reply_markup: { inline_keyboard: OSM_MORE_BUTTONS }
-    });
-    return;
-  }
-  const keyboard = results.map((item, i) => {
-    const place = osmPlace(item);
-    const text = clip(`${i + 1}. ${osmName(item)}${place ? ` – ${place}` : ""}`, 64);
-    return [{ text, callback_data: `osmnode:${item.id}` }];
-  });
-  const items = results.map((item, i) => osmItem(item, i + 1)).join("\n\n");
-  await sendMessage(env, chatId, `Which place on OpenStreetMap is "${escapeHtml(name)}"?\n\n${items}`, {
-    reply_markup: { inline_keyboard: [...keyboard, ...OSM_MORE_BUTTONS] },
-    parse_mode: "HTML",
-    link_preview_options: { is_disabled: true }
-  });
+  await askOsmPlace(sendMessage, env, chatId, session, results, OSM_MORE_BUTTONS);
 }
 
 /**

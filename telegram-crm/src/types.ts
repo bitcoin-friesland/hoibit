@@ -89,9 +89,15 @@ export interface Session {
   query?: string;
 
   // edit flow: what is edited (contact_id or organization_id), and its details as they were, so
-  // only changes are saved. The card keeps the details in the fields of the contact flow.
+  // only changes are saved. The card keeps the details in the fields of the contact flow; a
+  // contact's organization is organization_id and organization_label.
   edit_target?: "contact" | "organization";
   edit_original?: Record<string, string | null>;
+  // an organization's place on OpenStreetMap ("node/123"), and its name once one is chosen
+  location_osm_id?: string | null;
+  location_label?: string;
+  // the places found on OpenStreetMap: id -> name
+  osm_choices?: Record<string, string>;
 
   // team member flow
   invite_picker?: CommunityPicker;
