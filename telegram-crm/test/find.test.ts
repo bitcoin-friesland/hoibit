@@ -136,6 +136,8 @@ describe("editing from a card", () => {
         "📧 Email: anna@satoshi.cafe",
         "📞 Phone: —",
         "🟣 Nostr: —",
+        "🏷️ Type: Entrepreneur",
+        "🏢 Organization: Cafe Satoshi",
         "",
         "Tap a detail to change it, then Save."
       ].join("\n")
@@ -180,6 +182,119 @@ describe("editing from a card", () => {
     await chat.press("card:save");
     expect(sent.at(-2)?.text).toBe('✅ "Café Satoshi" updated.');
     expect(await crm.organizationDetails(orgId)).toMatchObject({ name: "Café Satoshi", website: null, status: 2 });
+  });
+
+  it("changes a contact's type and organization, and unlinks it", async () => {
+    const adminId = await addAdmin(ADMIN);
+    const { annaId } = await seed(adminId);
+    const other = await crm.newOrg({ name: "Bitcoin Bakery", status: 1, created_by: adminId });
+    if (!other.ok) throw new Error(other.error);
+    const chat = chatAs(ADMIN);
+    await chat.press(`edit:c:${annaId}`);
+    await chat.press("card:type");
+    expect(lastText()).toBe("Is Anna a consumer or an entrepreneur?");
+    await chat.press("type:consumer");
+    expect(lastText()).toContain("🏷️ Type: Consumer\n🏢 Organization: Cafe Satoshi");
+    await chat.press("card:contact_organization");
+    expect(lastButtons().map(b => b.text)).toEqual(["⬅️ Back", "🗑️ Unlink", "✖️ Cancel"]);
+    await chat.text("Nothing like it");
+    expect(lastText()).toContain('No organization found with the name "Nothing like it".');
+    await chat.text("bakery");
+    expect(lastButtons().map(b => b.callback_data)).toEqual([`select_org:${other.id}`, "card:back", "cancel"]);
+    await chat.press(`select_org:${other.id}`);
+    expect(lastText()).toContain("🏷️ Type: Consumer\n🏢 Organization: Bitcoin Bakery");
+    await chat.press("card:save");
+    expect(sent.at(-2)?.text).toBe('✅ "Anna" updated.');
+    expect(await crm.contactDetails(annaId)).toMatchObject({ type: "consumer", organization_id: other.id });
+    const audit = await env.DB.prepare(
+      "SELECT change_details FROM audit_log WHERE table_name = 'contacts' AND action = 'update'"
+    ).first<{ change_details: string }>();
+    expect(JSON.parse(audit!.change_details)).toEqual({
+      fields: {
+        type: { old: "entrepreneur", new: "consumer" },
+        organization_id: { old: expect.any(Number), new: other.id }
+      }
+    });
+
+    await chat.press(`edit:c:${annaId}`);
+    await chat.press("card:contact_organization");
+    await chat.press("card:remove");
+    expect(lastText()).toContain("🏢 Organization: —");
+    await chat.press("card:save");
+    expect(await crm.contactDetails(annaId)).toMatchObject({ organization_id: null });
+  });
+
+  it("changes an organization's communities and location", async () => {
+    sent = await resetAndStubFetch({
+      nominatim: [
+        {
+          osm_type: "node",
+          osm_id: 42,
+          class: "amenity",
+          type: "cafe",
+          display_name: "Cafe Satoshi, Leeuwarden",
+          address: { road: "Nieuwestad", city: "Leeuwarden" }
+        }
+      ]
+    });
+    const adminId = await addAdmin(ADMIN);
+    const { orgId } = await seed(adminId);
+    await env.DB.prepare("INSERT INTO organization_communities (organization_id, community_id) VALUES (?, 1)")
+      .bind(orgId)
+      .run();
+    const chat = chatAs(ADMIN);
+    await chat.press(`edit:o:${orgId}`);
+    expect(lastText()).toContain("🟣 Nostr: —\n👥 Communities: Hard Money Cafe\n📍 Location: —");
+
+    await chat.press("card:communities");
+    expect(lastText()).toBe("Select Bitcoin communities for this organization:");
+    expect(lastButtons()[0].text).toBe("✅ Hard Money Cafe");
+    await chat.press("community:1");
+    await chat.press("choose_other");
+    await chat.press("country:0");
+    await chat.press("community:2");
+    await chat.press("done");
+    expect(lastText()).toContain("👥 Communities: Arnhem Bitcoinstad");
+
+    await chat.press("card:location");
+    expect(lastText()).toContain('Which place on OpenStreetMap is "Cafe Satoshi"?');
+    expect(lastButtons().map(b => b.text)).toEqual([
+      "1. Cafe Satoshi – Nieuwestad, Leeuwarden",
+      "🔍 Search another name",
+      "⬅️ Back",
+      "✖️ Cancel"
+    ]);
+    await chat.press("osmnode:node/42");
+    expect(lastText()).toContain("📍 Location: Cafe Satoshi – Nieuwestad, Leeuwarden");
+    await chat.press("card:save");
+    expect(sent.at(-2)?.text).toBe('✅ "Cafe Satoshi" updated.');
+    expect(await crm.organizationDetails(orgId)).toMatchObject({
+      location_osm_id: "node/42",
+      communities: ["Arnhem Bitcoinstad"]
+    });
+
+    await chat.press(`edit:o:${orgId}`);
+    expect(lastText()).toContain("📍 Location: https://www.openstreetmap.org/node/42");
+    await chat.press("card:location");
+    await chat.press("card:remove");
+    expect(lastText()).toContain("📍 Location: —");
+    await chat.press("card:save");
+    expect((await crm.organizationDetails(orgId))!.location_osm_id).toBeNull();
+  });
+
+  it("goes back to the card without changes", async () => {
+    const adminId = await addAdmin(ADMIN);
+    const { orgId } = await seed(adminId);
+    const chat = chatAs(ADMIN);
+    await chat.press(`edit:o:${orgId}`);
+    await chat.press("card:communities");
+    await chat.press("skip");
+    await chat.press("card:location");
+    expect(lastText()).toBe('Nothing found on OpenStreetMap for "Cafe Satoshi".');
+    await chat.press("osm:search");
+    await chat.press("card:back");
+    await chat.press("card:save");
+    expect(sent.at(-2)?.text).toBe("Nothing changed.");
   });
 
   it("saves nothing when nothing changed", async () => {
