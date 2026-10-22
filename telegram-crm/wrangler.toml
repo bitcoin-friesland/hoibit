@@ -27,6 +27,11 @@ class_name = "ChatSession"
 tag = "v1"
 new_sqlite_classes = ["ChatSession"]
 
+# The morning reminder of follow-ups (src/flows/followup.ts): 06:00 UTC is 07:00 in winter and
+# 08:00 in summer in the Netherlands.
+[triggers]
+crons = ["0 6 * * *"]
+
 # Workers Logs: keeps console.error output (failed Telegram calls, update errors).
 [observability]
 enabled = true
