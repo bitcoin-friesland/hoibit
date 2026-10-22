@@ -22,7 +22,7 @@ type MemberNames = Pick<TeamMemberSummary, "name" | "telegram_username" | "teleg
 const memberLabel = (m: MemberNames) => m.name ?? (m.telegram_username ? `@${m.telegram_username}` : m.telegram_id);
 
 // How a member is listed: the name with the @username, which also tells equal names apart.
-const memberLine = (m: MemberNames) =>
+export const memberLine = (m: MemberNames) =>
   m.name && m.telegram_username ? `${m.name} (@${m.telegram_username})` : memberLabel(m);
 
 // One button per member. Members with the same name and no username are told apart by Telegram ID.
@@ -117,8 +117,8 @@ const editPickerTitle = (label: string) => `Select the Bitcoin communities of ${
 
 type MemberChanges = Omit<UpdateTeamMemberInput, "team_member_id" | "updated_by">;
 
-// Saves changes to the member chosen in this flow and reports the result.
-async function saveMemberChanges(
+// Saves changes to the member chosen in this flow (or to oneself, /me) and reports the result.
+export async function saveMemberChanges(
   sendMessage: SendMessage,
   env: Env,
   chatId: ChatId,
