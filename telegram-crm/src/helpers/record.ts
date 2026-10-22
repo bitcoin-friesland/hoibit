@@ -31,8 +31,9 @@ export function parseRecordData(data: string, action: "show" | "edit"): RecordRe
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
 // "• 2026-10-21 · Anna · Phone (Jan): Interested in a terminal"; withContact on an organization's card.
+// The day it took place, or for conversations logged before that was asked, the day it was logged.
 function conversationLine(c: ConversationSummary, withContact: boolean) {
-  const when = c.logged_at?.slice(0, 10);
+  const when = c.happened_on ?? c.logged_at?.slice(0, 10);
   const about = [when, withContact ? c.contact_name : undefined, c.channel].filter(Boolean).join(" · ");
   const by = c.logged_by ? ` (${c.logged_by})` : "";
   return `• ${about}${by}${c.note ? `: ${clip(c.note, NOTE_MAX_LENGTH)}` : ""}`;

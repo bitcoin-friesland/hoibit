@@ -1,5 +1,6 @@
 import { isValidNote } from "../helpers/validation";
 import { setStep } from "../helpers/session";
+import { dayLabel, parseDay, teamDay } from "../helpers/day";
 import { errorMessage, successMessage } from "../helpers/messaging";
 import { handleContactFlow } from "./contact";
 import { statusButton } from "./status";
@@ -9,6 +10,7 @@ const CONTACT_MAX_RESULTS = 8;
 // Contacts the member added or talked to lately, offered when /logconversation starts.
 const RECENT_MAX_RESULTS = 5;
 const CONTACT_PROMPT = "Which contact did you talk to? Type part of the name.";
+const DAY_PROMPT = "Type the date, like 14-10 or 14-10-2026.";
 
 // How a contact is named in this flow: with their organization, which tells equal names apart.
 const contactLabel = (c: { name: string; organization_name: string | null }) =>
@@ -56,7 +58,7 @@ async function statusFollowUp(env: Env, contactId: number): Promise<SendOptions 
   }
 }
 
-// Steps: search and pick a contact, pick a channel, write the note, save.
+// Steps: search and pick a contact, pick a channel, pick the day, write the note, save.
 export const handleConversationFlow: FlowHandler = async (
   sendMessage,
   env,
@@ -185,6 +187,44 @@ export const handleConversationFlow: FlowHandler = async (
         return;
       }
       session.channel = channel;
+      setStep(session, "awaiting_date");
+      await persistSession();
+      await sendMessage(env, chatId, `When did you talk to ${session.contact_label}?`, {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "Today", callback_data: "date:today" },
+              { text: "Yesterday", callback_data: "date:yesterday" }
+            ],
+            [{ text: "📅 Other date", callback_data: "date:other" }]
+          ]
+        },
+        // A typed date counts too, without pressing Other date first.
+        accepts_text: true
+      });
+      break;
+    }
+    case "awaiting_date": {
+      const cb = text === undefined ? session.last_callback_data : null;
+      if (cb === "date:other") {
+        await sendMessage(env, chatId, DAY_PROMPT);
+        return;
+      }
+      const day =
+        cb === "date:today" ? teamDay(0) : cb === "date:yesterday" ? teamDay(1) : text ? parseDay(text) : undefined;
+      if (!day) {
+        await sendMessage(
+          env,
+          chatId,
+          errorMessage(
+            text
+              ? `"${text.trim()}" is not a date that has passed. ${DAY_PROMPT}`
+              : "Please choose a day from the buttons, or type a date."
+          )
+        );
+        return;
+      }
+      session.happened_on = day;
       setStep(session, "awaiting_note");
       await persistSession();
       await sendMessage(env, chatId, "What was discussed? (minimum 5 characters)");
@@ -204,6 +244,7 @@ export const handleConversationFlow: FlowHandler = async (
           contact_id: session.contact_id ?? 0,
           channel: session.channel ?? "",
           note,
+          happened_on: session.happened_on ?? null,
           created_by: session.created_by || null
         });
         if (!res.ok) console.error("Logging a conversation was refused", res);
@@ -223,7 +264,9 @@ export const handleConversationFlow: FlowHandler = async (
       await sendMessage(
         env,
         chatId,
-        successMessage(`Conversation with ${session.contact_label} (${channelLabel}) logged.`),
+        successMessage(
+          `Conversation with ${session.contact_label} (${[channelLabel, session.happened_on && dayLabel(session.happened_on)].filter(Boolean).join(", ")}) logged.`
+        ),
         await statusFollowUp(env, session.contact_id ?? 0)
       );
       await removeSession();

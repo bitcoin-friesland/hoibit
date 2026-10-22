@@ -111,6 +111,7 @@ describe("input routing", () => {
     await chat.text("ali");
     await chat.press(`select_contact:${contactId}`);
     await chat.press("channel:phone");
+    await chat.press("date:today");
     await chat.text("/note met Alice");
     expect(lastText()).toBe("Unknown command. Type /help for available commands.");
     expect(sessionOf(ADMIN)).toMatchObject({ step: "awaiting_note" });
@@ -232,6 +233,7 @@ describe("group chats", () => {
     await admin.text("ali");
     await admin.press(`select_contact:${contactId}`);
     await admin.press("channel:phone");
+    await admin.press("date:today");
     const question = sent[sent.length - 1];
     expect(JSON.parse(question.reply_markup!)).toEqual({ force_reply: true });
     expect(question.reply_parameters).toBeUndefined();
@@ -246,6 +248,7 @@ describe("group chats", () => {
     await admin.text("ali");
     await admin.press(`select_contact:${contactId}`);
     await admin.press("channel:phone");
+    await admin.press("date:today");
     await admin.text("Talked about a Lightning terminal");
     expect(group.sessionOf(ADMIN)).toBeUndefined();
     expect(sent[sent.length - 1].reply_markup).toBeUndefined();
@@ -267,6 +270,7 @@ describe("group chats", () => {
     await admin.text("ali");
     await admin.press(`select_contact:${contactId}`);
     await admin.press("channel:phone");
+    await admin.press("date:today");
     await admin.text("/cancel@HoiBitBot");
     const count = await env.DB.prepare("SELECT COUNT(*) AS n FROM conversations").first();
     expect({ count, session: group.sessionOf(ADMIN) }).toEqual({ count: { n: 0 }, session: undefined });

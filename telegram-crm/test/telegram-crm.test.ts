@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import CrmApi from "../../crm-api/src/index";
+import { teamDay } from "../src/helpers/day";
 import { escapeForOverpass } from "../src/helpers/osm";
 import {
   addAdmin,
@@ -192,9 +193,16 @@ describe("/logconversation", () => {
     await chat.press(`select_contact:${contactId}`);
     expect(lastText()).toBe("How did you talk to Alice?");
     await chat.press("channel:phone");
+    expect(lastText()).toBe("When did you talk to Alice?");
+    expect(
+      JSON.parse(sent[sent.length - 1].reply_markup!)
+        .inline_keyboard.flat()
+        .map((b: { text: string }) => b.text)
+    ).toEqual(["Today", "Yesterday", "📅 Other date", "✖️ Cancel"]);
+    await chat.press("date:today");
     expect(lastText()).toBe("What was discussed? (minimum 5 characters)");
     await chat.text("Wants to accept Lightning payments");
-    expect(lastText()).toBe("✅ Conversation with Alice (Phone) logged.");
+    expect(lastText()).toBe("✅ Conversation with Alice (Phone, today) logged.");
 
     const row = await env.DB.prepare(
       `SELECT c.contact_id, c.channel, c.note, c.created_by, a.performed_by
@@ -208,6 +216,40 @@ describe("/logconversation", () => {
       created_by: adminId,
       performed_by: adminId
     });
+    expect(await env.DB.prepare("SELECT happened_on FROM conversations").first()).toEqual({ happened_on: teamDay() });
+  });
+
+  it("logs a conversation of yesterday or of a typed date, and shows that day on the card", async () => {
+    await addAdmin(ADMIN);
+    const contactId = await addContact("Alice");
+    const chat = chatAs(ADMIN);
+    await chat.text("/logconversation");
+    await chat.text("ali");
+    await chat.press(`select_contact:${contactId}`);
+    await chat.press("channel:phone");
+    await chat.press("date:yesterday");
+    await chat.text("Called back about the terminal");
+    expect(lastText()).toBe("✅ Conversation with Alice (Phone, yesterday) logged.");
+
+    await chat.text("/logconversation");
+    await chat.text("ali");
+    await chat.press(`select_contact:${contactId}`);
+    await chat.press("channel:in-person");
+    await chat.press("date:other");
+    expect(lastText()).toBe("Type the date, like 14-10 or 14-10-2026.");
+    await chat.text("31-12-2999");
+    expect(lastText()).toBe('❌ "31-12-2999" is not a date that has passed. Type the date, like 14-10 or 14-10-2026.');
+    // Typed straight away, without Other date, works as well.
+    await chat.text("1-3-2025");
+    await chat.text("Met at the meetup");
+    expect(lastText()).toBe("✅ Conversation with Alice (In Person, 01-03-2025) logged.");
+
+    const days = await env.DB.prepare("SELECT happened_on FROM conversations ORDER BY id").all();
+    expect(days.results).toEqual([{ happened_on: teamDay(1) }, { happened_on: "2025-03-01" }]);
+    await chat.text("/find alice");
+    const card = sent.find(m => m.text?.startsWith("👤 Alice"));
+    expect(card?.text).toContain(`• ${teamDay(1)} · Phone (Admin): Called back about the terminal`);
+    expect(card?.text).toContain("• 2025-03-01 · In Person (Admin): Met at the meetup");
   });
 
   it("asks again when no contact matches or a button is not from the list", async () => {
@@ -288,6 +330,7 @@ describe("/logconversation, quicker", () => {
     await chat.text("/logconversation");
     await chat.press(`select_contact:${contactId}`);
     await chat.press("channel:phone");
+    await chat.press("date:today");
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const spy = vi.spyOn(CrmApi.prototype, "logConversation").mockRejectedValue(new Error("D1_ERROR: unavailable"));
     try {
@@ -298,7 +341,7 @@ describe("/logconversation, quicker", () => {
       error.mockRestore();
     }
     await chat.press("retry");
-    expect(lastText()).toBe("✅ Conversation with Anna (Phone) logged.");
+    expect(lastText()).toBe("✅ Conversation with Anna (Phone, today) logged.");
     expect(await env.DB.prepare("SELECT note FROM conversations").first()).toEqual({
       note: "Wants a Lightning terminal"
     });
