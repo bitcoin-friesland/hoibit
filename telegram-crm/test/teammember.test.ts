@@ -8,6 +8,7 @@ import {
   groupChat,
   lastKeyboardMessage,
   resetAndStubFetch,
+  workerEnv,
   type SentMessage
 } from "./harness";
 
@@ -221,6 +222,32 @@ describe("invite links", () => {
     if (!token) throw new Error(`No invite link in: ${lastText()}`);
     return token;
   }
+
+  it("can give a placeholder member access, who keeps their name and organizations", async () => {
+    await addAdmin(ADMIN);
+    const hugo = (await env.DB.prepare("INSERT INTO team_members (name) VALUES ('Hugo') RETURNING id").first<{
+      id: number;
+    }>())!.id;
+    const org = await workerEnv.crmApi.newOrg({ name: "Winkel", status: 2, team_member_ids: [hugo] });
+    if (!org.ok) throw new Error(org.error);
+    const chat = chatAs(ADMIN);
+    await chat.text("/invite");
+    expect(lastText()).toMatch(/^Who is the invite for\?/);
+    expect(lastButtons()).toEqual(["➕ Someone new", "👤 Hugo"]);
+    await chat.press(`invite_for:${hugo}`);
+    expect(lastText()).toBe("Which Bitcoin communities will the new team member join?");
+    await chat.press("skip");
+    const token = /^🔗 Invite link for Hugo:\nhttps:\/\/t\.me\/\w+\?start=(inv_[\w-]+)\n/.exec(lastText())?.[1];
+    expect(token).toBeDefined();
+
+    await chatAs(MEMBER, { first_name: "Hugo", last_name: "Tester" }).text(`/start ${token}`);
+    expect(textsTo(MEMBER)[0]).toMatch(/^👋 Welcome to the team, Hugo!/);
+    expect(await workerEnv.crmApi.validateUser(String(MEMBER))).toMatchObject({ id: hugo, name: "Hugo" });
+    expect((await workerEnv.crmApi.organizationDetails(org.id))!.handled_by.map(h => h.id)).toEqual([hugo]);
+    // Nobody is left without access, so the next /invite goes straight to the communities.
+    await chat.text("/invite");
+    expect(lastText()).toBe("Which Bitcoin communities will the new team member join?");
+  });
 
   it("gives the admin a one-time link; whoever opens it joins with the chosen communities", async () => {
     const adminId = await addAdmin(ADMIN);

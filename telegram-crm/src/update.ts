@@ -158,7 +158,8 @@ async function acceptInvite(env: Env, chatId: ChatId, user: TelegramUser, token:
     await sendMenu(env, chatId, false, "You're already on the team.");
     return;
   }
-  const lines = [`👋 Welcome to the team, ${name}!`];
+  // An invite for a placeholder keeps the name the team already knew them by.
+  const lines = [`👋 Welcome to the team, ${res.name ?? name}!`];
   if (res.invited_by?.name) lines.push(`${res.invited_by.name} invited you.`);
   if (res.communities.length > 0) lines.push(`Your communities: ${res.communities.join(", ")}.`);
   await sendMenu(env, chatId, false, lines.join("\n"));

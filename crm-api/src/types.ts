@@ -66,6 +66,9 @@ export interface FirstUserInput {
 export interface CreateInviteInput {
   // The communities the new member joins.
   community_ids?: RowId[];
+  // A team member without access (see inactiveTeamMembers) whom the link gives access; leave it
+  // out for a new member.
+  member_id?: RowId | null;
   invited_by: RowId | null;
 }
 
@@ -87,6 +90,8 @@ export interface AcceptInviteInput {
 export interface AcceptedInvite {
   // team_members.id of the new member, or of the member who already had access.
   id: number;
+  // The member's name on the team: for an invite for an existing member, the name they had.
+  name: string | null;
   // The Telegram user already was a team member; the invite stays unused.
   existing?: true;
   // Who created the invite, to tell them the member joined; null when they have no access anymore.
@@ -278,7 +283,7 @@ export interface FollowUp {
 export interface FollowUpSearch {
   // Up to and including this day, "YYYY-MM-DD".
   until: string;
-  // Only the organizations this team member handles, and those nobody handles.
+  // Only the organizations this team member handles, and those nobody with access handles.
   team_member_id?: RowId | null;
 }
 

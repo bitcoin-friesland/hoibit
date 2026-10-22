@@ -180,6 +180,7 @@ describe("invites", () => {
     expect(await crm.acceptInvite({ token, telegram_id: "1001", name: "Admin" })).toEqual({
       ok: true,
       id: adminId,
+      name: "Admin",
       existing: true,
       invited_by: { telegram_id: "1001", name: "Admin" },
       communities: []
@@ -232,6 +233,82 @@ describe("invites", () => {
     expect(await crm.acceptInvite({ token, telegram_id: 2002, name: "Carol" })).toMatchObject({
       ok: true,
       invited_by: null
+    });
+  });
+});
+
+describe("invites for team members without access", () => {
+  // A placeholder as the Baserow import creates it: a name, no Telegram account.
+  async function placeholder(name: string) {
+    const res = await env.DB.prepare("INSERT INTO team_members (name) VALUES (?) RETURNING id")
+      .bind(name)
+      .first<{ id: number }>();
+    return res!.id;
+  }
+
+  it("gives the placeholder the Telegram account, with its name, organizations and conversations", async () => {
+    const adminId = await createFirstUser();
+    const hugo = await placeholder("Hugo");
+    const org = await crm.newOrg({ name: "Winkel", status: 2, team_member_ids: [hugo] });
+    if (!org.ok) throw new Error(org.error);
+    expect(await crm.inactiveTeamMembers()).toEqual([{ id: hugo, name: "Hugo" }]);
+
+    const invite = await crm.createInvite({ invited_by: adminId, member_id: hugo, community_ids: [6] });
+    if (!invite.ok) throw new Error(invite.error);
+    const res = await crm.acceptInvite({
+      token: invite.token,
+      telegram_id: "4242",
+      name: "Hugo X.",
+      telegram_username: "hugo_x"
+    });
+    expect(res).toEqual({
+      ok: true,
+      id: hugo,
+      name: "Hugo",
+      invited_by: { telegram_id: "1001", name: "Admin" },
+      communities: ["Bitcoin Friesland"]
+    });
+    expect(await crm.validateUser("4242")).toMatchObject({ id: hugo, name: "Hugo", telegram_username: "hugo_x" });
+    expect((await crm.organizationDetails(org.id))!.handled_by).toEqual([
+      { id: hugo, name: "Hugo", telegram_id: "4242" }
+    ]);
+    expect(await crm.inactiveTeamMembers()).toEqual([]);
+    const audit = await env.DB.prepare(
+      "SELECT record_id, performed_by, change_details FROM audit_log WHERE table_name = 'team_members' AND action = 'update'"
+    ).first<{ record_id: string; performed_by: number; change_details: string }>();
+    expect(audit).toMatchObject({ record_id: String(hugo), performed_by: adminId });
+    expect(JSON.parse(audit!.change_details).fields).toEqual({
+      telegram_id: { old: null, new: "4242" },
+      telegram_username: { old: null, new: "hugo_x" },
+      community_ids: { old: null, new: [6] }
+    });
+  });
+
+  it("refuses an invite for a member who has access or does not exist", async () => {
+    const adminId = await createFirstUser();
+    expect(await crm.createInvite({ invited_by: adminId, member_id: adminId })).toMatchObject({
+      ok: false,
+      status: 409
+    });
+    expect(await crm.createInvite({ invited_by: adminId, member_id: 9999 })).toMatchObject({
+      ok: false,
+      status: 404
+    });
+  });
+
+  it("counts an organization handled only by a placeholder as nobody's in the follow-ups", async () => {
+    const adminId = await createFirstUser();
+    const hugo = await placeholder("Hugo");
+    const org = await crm.newOrg({ name: "Winkel", status: 2, follow_up_on: "2026-01-01", team_member_ids: [hugo] });
+    if (!org.ok) throw new Error(org.error);
+    expect(await crm.followUps({ until: "2026-12-31", team_member_id: adminId })).toMatchObject({
+      ok: true,
+      follow_ups: [{ id: org.id, handled_by: [{ id: hugo, name: "Hugo", telegram_id: null }] }]
+    });
+    // And a placeholder can be kept as handler when the organization is edited.
+    expect(await crm.updateOrg({ organization_id: org.id, team_member_ids: [hugo, adminId] })).toEqual({
+      ok: true,
+      changed: true
     });
   });
 });

@@ -112,6 +112,9 @@ export interface Session {
 
   // team member flow
   invite_picker?: CommunityPicker;
+  // an invite for a member without access (a placeholder): team_members.id -> name, and the one chosen
+  invite_member_choices?: Record<string, string>;
+  invite_member_id?: number;
   admin_action?: "grant" | "revoke";
   // team_members.id -> label (name, or Telegram ID when the member has no name)
   admin_candidates?: Record<string, string | null>;
