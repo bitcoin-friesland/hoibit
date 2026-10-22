@@ -220,6 +220,15 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return results;
   }
 
+  // Members without access: placeholders that have not joined yet (Baserow import) and members
+  // whose access was removed. An invite can give one of them access (createInvite member_id).
+  async inactiveTeamMembers(): Promise<{ id: number; name: string | null }[]> {
+    const { results } = await this.db
+      .prepare(`SELECT id, name FROM team_members WHERE telegram_id IS NULL ORDER BY name COLLATE NOCASE, id`)
+      .all<{ id: number; name: string | null }>();
+    return results;
+  }
+
   // First user registration: only allowed while there are no team members; the first user is admin.
   // The check is part of the INSERT, so of two simultaneous first users only one gets in.
   async firstUser(data: FirstUserInput): Promise<Result<{ id: number }>> {
@@ -254,10 +263,20 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     return { ok: true, id: lastId(results) };
   }
 
-  // Creates a one-time invite link for a new team member, who will join the given communities.
+  // Creates a one-time invite link for a new team member, or for a member without access
+  // (member_id), who will join the given communities.
   async createInvite(data: CreateInviteInput): Promise<Result<Invite>> {
     const invitedBy = data.invited_by;
     if (!invitedBy || !(await this.isAdmin(invitedBy))) return refuse(403, "Only admins can invite team members");
+    const memberId = toIntOrNull(data.member_id);
+    if (memberId) {
+      const member = await this.db
+        .prepare(`SELECT telegram_id FROM team_members WHERE id = ?`)
+        .bind(memberId)
+        .first<{ telegram_id: string | null }>();
+      if (!member) return refuse(404, "Team member not found");
+      if (member.telegram_id !== null) return refuse(409, "This team member already has access");
+    }
     const communityIds = sortedIds((data.community_ids ?? []).map(toInt));
     // Checked now: an unknown community would otherwise only fail when the new member opens the link.
     if (communityIds.length > 0) {
@@ -274,8 +293,10 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     const performedBy = toInt(invitedBy);
     await this.db.batch([
       this.db
-        .prepare(`INSERT INTO team_invites (token, invited_by, community_ids, expires_at) VALUES (?, ?, ?, ?)`)
-        .bind(token, performedBy, JSON.stringify(communityIds), expiresAt),
+        .prepare(
+          `INSERT INTO team_invites (token, invited_by, community_ids, expires_at, member_id) VALUES (?, ?, ?, ?, ?)`
+        )
+        .bind(token, performedBy, JSON.stringify(communityIds), expiresAt, memberId),
       // Without the token: whoever can read the log must not be able to use the link.
       this.db.prepare(auditSql(insertedIdText("team_invites"))).bind(
         "insert",
@@ -285,7 +306,8 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
           fields: {
             invited_by: created(performedBy),
             community_ids: created(communityIds),
-            expires_at: created(expiresAt)
+            expires_at: created(expiresAt),
+            ...(memberId ? { member_id: created(memberId) } : {})
           }
         })
       )
@@ -295,8 +317,10 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
 
   /**
    * Adds the Telegram user who opened an invite link as a team member, in the invite's
-   * communities; the invite is then used up. A user who already has access gets existing: true
-   * and leaves the invite unused, so it can still reach the person it was meant for.
+   * communities; the invite is then used up. An invite for an existing member without access
+   * gives that member the Telegram account instead, keeping their name, history and organizations.
+   * A user who already has access gets existing: true and leaves the invite unused, so it can still
+   * reach the person it was meant for.
    */
   async acceptInvite(data: AcceptInviteInput): Promise<Result<AcceptedInvite>> {
     if (!data.token || !data.telegram_id || !data.name) return refuse(400, "Missing token, telegram_id or name");
@@ -304,9 +328,11 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (username && !TELEGRAM_USERNAME.test(username)) return refuse(400, "Invalid telegram_username");
     const invite = await this.db
       .prepare(
-        `SELECT i.id, i.invited_by, i.community_ids, i.expires_at, i.used_by,
-                m.telegram_id AS inviter_telegram_id, m.name AS inviter_name
-         FROM team_invites i LEFT JOIN team_members m ON m.id = i.invited_by
+        `SELECT i.id, i.invited_by, i.community_ids, i.expires_at, i.used_by, i.member_id,
+                m.telegram_id AS inviter_telegram_id, m.name AS inviter_name, p.name AS member_name
+         FROM team_invites i
+         LEFT JOIN team_members m ON m.id = i.invited_by
+         LEFT JOIN team_members p ON p.id = i.member_id
          WHERE i.token = ?`
       )
       .bind(data.token)
@@ -316,8 +342,10 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
         community_ids: string;
         expires_at: number;
         used_by: number | null;
+        member_id: number | null;
         inviter_telegram_id: string | null;
         inviter_name: string | null;
+        member_name: string | null;
       }>();
     if (!invite) return refuse(404, "Unknown invite");
     // A removed inviter keeps their row without telegram_id and can no longer be told.
@@ -326,39 +354,70 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       : null;
     const telegramId = String(data.telegram_id);
     const existing = await this.validateUser(telegramId);
-    if (existing) return { ok: true, id: existing.id, existing: true, invited_by: invitedBy, communities: [] };
+    const alreadyIn = (member: TeamMember): Result<AcceptedInvite> => ({
+      ok: true,
+      id: member.id,
+      name: member.name,
+      existing: true,
+      invited_by: invitedBy,
+      communities: []
+    });
+    if (existing) return alreadyIn(existing);
     const now = Date.now();
     const usedUp = refuse(409, "Invite already used or expired");
     if (invite.used_by !== null || invite.expires_at <= now) return usedUp;
 
     const communityIds = JSON.parse(invite.community_ids) as number[];
-    const memberIdSql = lastIdSql("team_members");
+    const claimed = invite.member_id;
+    const memberIdSql = claimed ? String(claimed) : lastIdSql("team_members");
+    const usable = `EXISTS (SELECT 1 FROM team_invites WHERE id = ? AND used_by IS NULL AND expires_at > ?)
+             AND NOT EXISTS (SELECT 1 FROM team_members WHERE telegram_id = ?)`;
+    // The admin who created the invite is the one who let the member in.
+    const joined = claimed
+      ? [
+          this.db
+            .prepare(
+              `UPDATE team_members SET telegram_id = ?, telegram_username = ?
+               WHERE id = ? AND telegram_id IS NULL AND ${usable}`
+            )
+            .bind(telegramId, username, claimed, invite.id, now, telegramId),
+          this.db.prepare(auditSql("?", { afterChange: true })).bind(
+            "update",
+            "team_members",
+            String(claimed),
+            invite.invited_by,
+            JSON.stringify({
+              fields: {
+                telegram_id: { old: null, new: telegramId },
+                ...(username ? { telegram_username: { old: null, new: username } } : {}),
+                ...(communityIds.length > 0 ? { community_ids: { old: null, new: communityIds } } : {})
+              }
+            })
+          )
+        ]
+      : [
+          this.db
+            .prepare(`INSERT INTO team_members (telegram_id, telegram_username, name) SELECT ?, ?, ? WHERE ${usable}`)
+            .bind(telegramId, username, data.name, invite.id, now, telegramId),
+          this.db.prepare(auditSql(insertedIdText("team_members"), { afterChange: true })).bind(
+            "insert",
+            "team_members",
+            invite.invited_by,
+            JSON.stringify({
+              fields: {
+                telegram_id: created(telegramId),
+                ...(username ? { telegram_username: created(username) } : {}),
+                name: created(data.name),
+                ...(communityIds.length > 0 ? { community_ids: created(communityIds) } : {})
+              }
+            })
+          )
+        ];
     // One transaction in which every statement only changes something when the one before it
-    // changed exactly one row (changes() = 1). The first, the INSERT, checks that the invite is
-    // still unused and unexpired, so of two people opening the same link only one gets in.
+    // changed exactly one row (changes() = 1). The first checks that the invite is still unused
+    // and unexpired, so of two people opening the same link only one gets in.
     const results = await this.db.batch([
-      this.db
-        .prepare(
-          `INSERT INTO team_members (telegram_id, telegram_username, name)
-           SELECT ?, ?, ?
-           WHERE EXISTS (SELECT 1 FROM team_invites WHERE id = ? AND used_by IS NULL AND expires_at > ?)
-             AND NOT EXISTS (SELECT 1 FROM team_members WHERE telegram_id = ?)`
-        )
-        .bind(telegramId, username, data.name, invite.id, now, telegramId),
-      // The admin who created the invite is the one who let the member in.
-      this.db.prepare(auditSql(insertedIdText("team_members"), { afterChange: true })).bind(
-        "insert",
-        "team_members",
-        invite.invited_by,
-        JSON.stringify({
-          fields: {
-            telegram_id: created(telegramId),
-            ...(username ? { telegram_username: created(username) } : {}),
-            name: created(data.name),
-            ...(communityIds.length > 0 ? { community_ids: created(communityIds) } : {})
-          }
-        })
-      ),
+      ...joined,
       this.db
         .prepare(
           `UPDATE team_invites SET used_by = ${memberIdSql}, used_at = CURRENT_TIMESTAMP WHERE id = ? AND changes() = 1`
@@ -373,9 +432,10 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
           invite.invited_by,
           JSON.stringify({ fields: { used_by: { old: null, new: null } } })
         ),
+      // OR IGNORE: a member who had access before may still be in some of these communities.
       this.db
         .prepare(
-          `INSERT INTO team_member_communities (team_member_id, community_id)
+          `INSERT OR IGNORE INTO team_member_communities (team_member_id, community_id)
            SELECT ${memberIdSql}, value FROM json_each(?) WHERE changes() = 1`
         )
         .bind(invite.community_ids),
@@ -385,11 +445,17 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (results[0].meta.changes !== 1) {
       // Since the checks above, someone else used the invite, or this user got access.
       const member = await this.validateUser(telegramId);
-      if (member) return { ok: true, id: member.id, existing: true, invited_by: invitedBy, communities: [] };
+      if (member) return alreadyIn(member);
       return usedUp;
     }
     const communities = await this.teamMemberCommunities(telegramId);
-    return { ok: true, id: lastId(results), invited_by: invitedBy, communities: communities.map(c => c.name) };
+    return {
+      ok: true,
+      id: claimed ?? lastId(results),
+      name: claimed ? invite.member_name : data.name,
+      invited_by: invitedBy,
+      communities: communities.map(c => c.name)
+    };
   }
 
   // Changes name and/or time zone, and replaces the communities when community_ids is given.
@@ -867,14 +933,15 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
   /**
    * The organizations whose follow-up day is until or earlier, the earliest first, with the team
    * members who handle them. With team_member_id only those that member handles and those nobody
-   * handles.
+   * with access handles (no handler, or only placeholders that have not joined yet).
    */
   async followUps(search: FollowUpSearch): Promise<Result<{ follow_ups: FollowUp[] }>> {
     if (!isDay(search.until)) return refuse(400, "Invalid until");
     const memberId = toIntOrNull(search.team_member_id);
     const mine = memberId
       ? `AND (EXISTS (SELECT 1 FROM organization_team_members WHERE organization_id = o.id AND team_member_id = ?)
-              OR NOT EXISTS (SELECT 1 FROM organization_team_members WHERE organization_id = o.id))`
+              OR NOT EXISTS (SELECT 1 FROM organization_team_members otm JOIN team_members tm ON tm.id = otm.team_member_id
+                             WHERE otm.organization_id = o.id AND tm.telegram_id IS NOT NULL))`
       : "";
     const [orgs, handlers] = await this.db.batch([
       this.db
@@ -989,8 +1056,7 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
                 EXISTS (SELECT 1 FROM organization_statuses WHERE id = ?) AS known_status,
                 (SELECT COUNT(*) FROM bitcoin_communities WHERE id IN (SELECT value FROM json_each(?)))
                   AS known_communities,
-                (SELECT COUNT(*) FROM team_members
-                 WHERE telegram_id IS NOT NULL AND id IN (SELECT value FROM json_each(?))) AS known_members
+                (SELECT COUNT(*) FROM team_members WHERE id IN (SELECT value FROM json_each(?))) AS known_members
          FROM organizations WHERE id = ?`
       )
       .bind(status ?? null, JSON.stringify(communityIds ?? []), JSON.stringify(memberIds ?? []), orgId)
@@ -1012,7 +1078,7 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
     if (!row) return refuse(404, "Organization not found");
     if (status !== undefined && !row.known_status) return refuse(400, "Unknown status");
     if (communityIds && row.known_communities !== communityIds.length) return refuse(400, "Unknown community");
-    // Only members with access can handle an organization.
+    // Members without access count too: a placeholder handles organizations before joining.
     if (memberIds && row.known_members !== memberIds.length) return refuse(400, "Unknown team member");
     const { known_status: _, known_communities: __, known_members: ___, ...old } = row;
     const { statements, fields } = this.columnUpdates("organizations", orgId, old, {
