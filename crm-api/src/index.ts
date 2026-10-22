@@ -867,10 +867,10 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
   /**
    * The organizations whose follow-up day is until or earlier, the earliest first, with the team
    * members who handle them. With team_member_id only those that member handles and those nobody
-   * handles. Throws on an invalid day.
+   * handles.
    */
-  async followUps(search: FollowUpSearch): Promise<FollowUp[]> {
-    if (!isDay(search.until)) throw new Error(`Invalid until: ${search.until}`);
+  async followUps(search: FollowUpSearch): Promise<Result<{ follow_ups: FollowUp[] }>> {
+    if (!isDay(search.until)) return refuse(400, "Invalid until");
     const memberId = toIntOrNull(search.team_member_id);
     const mine = memberId
       ? `AND (EXISTS (SELECT 1 FROM organization_team_members WHERE organization_id = o.id AND team_member_id = ?)
@@ -899,10 +899,13 @@ export default class CrmApi extends WorkerEntrypoint<CrmEnv> {
       const { organization_id, ...handler } = h;
       byOrganization.set(organization_id, [...(byOrganization.get(organization_id) ?? []), handler]);
     }
-    return (orgs.results as Omit<FollowUp, "handled_by">[]).map(o => ({
-      ...o,
-      handled_by: byOrganization.get(o.id) ?? []
-    }));
+    return {
+      ok: true,
+      follow_ups: (orgs.results as Omit<FollowUp, "handled_by">[]).map(o => ({
+        ...o,
+        handled_by: byOrganization.get(o.id) ?? []
+      }))
+    };
   }
 
   // One transaction: only the real changes and their audit entry; nothing when nothing changes.
