@@ -3,12 +3,15 @@
  * the list of what is due. ⏰ Follow-up on its card and after a conversation asks for the day;
  * like the status buttons these belong to no session: fu:<organization id> asks, and
  * fu:<organization id>:<days> sets the day that many days from today, fu:<id>:x removes it.
- * Only fu:<id>:date starts a session (mode "followup"), to type a day.
+ * Only fu:<id>:date starts a session (mode "followup"), to type a day. Each morning the team
+ * members get a reminder of what is due (sendFollowUpReminders).
  */
 import { followUpLabel, parseFutureDay, teamDay, teamDayIn } from "../helpers/day";
 import { errorMessage, successMessage } from "../helpers/messaging";
 import { recordData } from "../helpers/record";
 import { setStep } from "../helpers/session";
+import { sendMessage } from "../helpers/telegram";
+import type { FollowUp } from "../../../crm-api/src/types";
 import type { FlowHandler, InlineKeyboardButton, SendOptions } from "../types";
 
 const DAY_PROMPT = "Type the day, like 12-01 or 12-01-2027.";
@@ -133,8 +136,14 @@ export async function followUpList(env: Env, memberId: number): Promise<{ text: 
   const until = teamDayIn(LIST_DAYS);
   const res = await env.crmApi.followUps({ until, team_member_id: memberId });
   if (!res.ok) throw new Error(res.error);
-  const due = res.follow_ups;
-  if (due.length === 0) return { text: `Nothing to follow up until ${followUpLabel(until)}. 🎉`, options: {} };
+  if (res.follow_ups.length === 0) {
+    return { text: `Nothing to follow up until ${followUpLabel(until)}. 🎉`, options: {} };
+  }
+  return dueMessage(`⏰ To follow up until ${followUpLabel(until)}:`, res.follow_ups);
+}
+
+// The organizations in due, under title, each with who handles it and a button to its card.
+function dueMessage(title: string, due: FollowUp[]): { text: string; options: SendOptions } {
   const shown = due.slice(0, LIST_MAX);
   const lines = shown.map(f => {
     const who = f.handled_by.length > 0 ? f.handled_by.map(h => h.name ?? "?").join(", ") : "nobody";
@@ -142,7 +151,7 @@ export async function followUpList(env: Env, memberId: number): Promise<{ text: 
   });
   const more = due.length > shown.length ? [`…and ${due.length - shown.length} more.`] : [];
   return {
-    text: [`⏰ To follow up until ${followUpLabel(until)}:`, ...lines, ...more].join("\n"),
+    text: [title, ...lines, ...more].join("\n"),
     options: {
       reply_markup: {
         inline_keyboard: shown.map(f => [
@@ -151,4 +160,29 @@ export async function followUpList(env: Env, memberId: number): Promise<{ text: 
       }
     }
   };
+}
+
+/**
+ * The morning reminder (cron in wrangler.toml): every team member with access gets a private
+ * message about the organizations they handle whose follow-up day is today or has passed, and
+ * the admins about those nobody with access handles (no handler, or only placeholders that have
+ * not joined yet). Members with nothing due get nothing. Throws when crm-api cannot be reached.
+ */
+export async function sendFollowUpReminders(env: Env, now = new Date()) {
+  const res = await env.crmApi.followUps({ until: teamDay(0, now) });
+  if (!res.ok) throw new Error(res.error);
+  if (res.follow_ups.length === 0) return;
+  const admins = (await env.crmApi.listTeamMembers()).filter(m => m.is_admin === 1).map(m => m.telegram_id);
+  const byMember = new Map<string, FollowUp[]>();
+  for (const followUp of res.follow_ups) {
+    const handlers = followUp.handled_by.flatMap(h => (h.telegram_id ? [h.telegram_id] : []));
+    for (const telegramId of handlers.length > 0 ? handlers : admins) {
+      byMember.set(telegramId, [...(byMember.get(telegramId) ?? []), followUp]);
+    }
+  }
+  for (const [telegramId, due] of byMember) {
+    const message = dueMessage("☀️ Good morning! To follow up today:", due);
+    // One member who blocked the bot must not stop the others' reminders; sendMessage logs it.
+    await sendMessage(env, telegramId, message.text, message.options);
+  }
 }

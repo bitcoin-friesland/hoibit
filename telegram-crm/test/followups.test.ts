@@ -1,7 +1,8 @@
-import { env } from "cloudflare:test";
+import { createScheduledController, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { NewOrgInput } from "../../crm-api/src/types";
 import { teamDay, teamDayIn } from "../src/helpers/day";
+import worker from "../src/index";
 import {
   addAdmin,
   addMember,
@@ -25,10 +26,11 @@ beforeEach(async () => {
 });
 
 const lastText = () => sent[sent.length - 1]?.text;
-const lastButtons = () =>
-  sent.at(-1)?.reply_markup
-    ? (JSON.parse(sent.at(-1)!.reply_markup!).inline_keyboard as { text: string; callback_data: string }[][]).flat()
+const buttonsOf = (message: SentMessage | undefined) =>
+  message?.reply_markup
+    ? (JSON.parse(message.reply_markup).inline_keyboard as { text: string; callback_data: string }[][]).flat()
     : [];
+const lastButtons = () => buttonsOf(sent.at(-1));
 const followUpOf = async (orgId: number) => (await crm.organizationDetails(orgId, 0))?.follow_up_on;
 // "12-01-2027" for "2027-01-12".
 const shown = (day: string) => day.split("-").reverse().join("-");
@@ -150,6 +152,67 @@ describe("/followups", () => {
     await addAdmin(ADMIN);
     await chatAs(ADMIN).press("menu:followups");
     expect(lastText()).toBe(`Nothing to follow up until ${shown(teamDayIn(7))}. 🎉`);
+  });
+});
+
+describe("morning reminder", () => {
+  const ADMIN2 = 6003;
+  const remind = () => worker.scheduled(createScheduledController(), workerEnv);
+  const textsTo = (telegramId: number) => sent.filter(m => String(m.chat_id) === String(telegramId)).map(m => m.text);
+
+  it("tells each member what they handle that is due today or overdue, and the admins what nobody handles", async () => {
+    const adminId = await addAdmin(ADMIN);
+    const memberId = (await addMember(MEMBER, "Erin"))!;
+    const admin2Id = (await env.DB.prepare(
+      "INSERT INTO team_members (telegram_id, name, is_admin) VALUES (?, 'Finn', 1) RETURNING id"
+    )
+      .bind(String(ADMIN2))
+      .first<number>("id"))!;
+    const placeholder = (await env.DB.prepare(
+      "INSERT INTO team_members (name) VALUES ('Gwen') RETURNING id"
+    ).first<number>("id"))!;
+    const today = await newOrg("Today", { follow_up_on: teamDay(0), team_member_ids: [memberId] });
+    const late = await newOrg("Late", { follow_up_on: teamDay(3), team_member_ids: [memberId, adminId] });
+    await newOrg("Tomorrow", { follow_up_on: teamDayIn(1), team_member_ids: [memberId] });
+    await newOrg("No day", { team_member_ids: [admin2Id] });
+    const nobody = await newOrg("Nobody's", { follow_up_on: teamDay(0) });
+    await newOrg("Gwen's", { follow_up_on: teamDay(1), team_member_ids: [placeholder] });
+
+    await remind();
+    expect(textsTo(MEMBER)).toEqual([
+      [
+        "☀️ Good morning! To follow up today:",
+        `• ${shown(teamDay(3))} (overdue) · Late · Hesitant · Admin, Erin`,
+        "• today · Today · Hesitant · Erin"
+      ].join("\n")
+    ]);
+    expect(buttonsOf(sent.find(m => String(m.chat_id) === String(MEMBER)))).toEqual([
+      { text: "🏢 Late", callback_data: `show:o:${late}` },
+      { text: "🏢 Today", callback_data: `show:o:${today}` }
+    ]);
+    const forAdmins = [
+      "☀️ Good morning! To follow up today:",
+      `• ${shown(teamDay(1))} (overdue) · Gwen's · Hesitant · Gwen`,
+      "• today · Nobody's · Hesitant · nobody"
+    ];
+    expect(textsTo(ADMIN2)).toEqual([forAdmins.join("\n")]);
+    expect(textsTo(ADMIN)).toEqual([
+      [forAdmins[0], `• ${shown(teamDay(3))} (overdue) · Late · Hesitant · Admin, Erin`, ...forAdmins.slice(1)].join(
+        "\n"
+      )
+    ]);
+    expect(buttonsOf(sent.find(m => String(m.chat_id) === String(ADMIN2)))).toContainEqual({
+      text: "🏢 Nobody's",
+      callback_data: `show:o:${nobody}`
+    });
+    expect(sent).toHaveLength(3);
+  });
+
+  it("sends nothing when nothing is due", async () => {
+    const adminId = await addAdmin(ADMIN);
+    await newOrg("Tomorrow", { follow_up_on: teamDayIn(1), team_member_ids: [adminId] });
+    await remind();
+    expect(sent).toEqual([]);
   });
 });
 
