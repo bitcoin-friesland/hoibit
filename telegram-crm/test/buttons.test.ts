@@ -176,8 +176,9 @@ describe("log conversation button", () => {
     await chat.press(JSON.parse(sent[sent.length - 1].reply_markup!).inline_keyboard[0][0].callback_data);
     expect(lastText()).toBe("How did you talk to Alice?");
     await chat.press("channel:in-person");
+    await chat.press("date:today");
     await chat.text("Met at the meetup");
-    expect(lastText()).toBe("✅ Conversation with Alice (In Person) logged.");
+    expect(lastText()).toBe("✅ Conversation with Alice (In Person, today) logged.");
     expect(await env.DB.prepare("SELECT channel, created_by FROM conversations").first()).toEqual({
       channel: "in-person",
       created_by: adminId

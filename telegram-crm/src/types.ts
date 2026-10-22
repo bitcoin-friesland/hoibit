@@ -78,6 +78,8 @@ export interface Session {
   contact_label?: string;
   channel_choices?: Record<string, string>;
   channel?: string;
+  // the day the conversation took place, "YYYY-MM-DD"
+  happened_on?: string;
   // the note of a conversation whose save failed, kept for Try again
   note?: string;
   // the name that found no contact, for "Add as a new contact"
