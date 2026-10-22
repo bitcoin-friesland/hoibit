@@ -1,3 +1,4 @@
+import { sendFollowUpReminders } from "./flows/followup";
 import { chatIdOf } from "./update";
 import type { TelegramUpdate } from "./types";
 
@@ -39,5 +40,10 @@ export default {
       console.error("Webhook update failed", e);
       return new Response("Error");
     }
+  },
+
+  // The morning reminder of follow-ups (crons in wrangler.toml).
+  async scheduled(_controller, env): Promise<void> {
+    await sendFollowUpReminders(env);
   }
 } satisfies ExportedHandler<Env>;
