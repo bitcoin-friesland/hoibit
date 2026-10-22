@@ -5,8 +5,8 @@
  * (updateContact / updateOrg) and shows the card again.
  *
  * Besides the typed details the card has actions this flow asks for itself: a contact's type and
- * organization, an organization's communities and its place on OpenStreetMap. Each returns to the
- * card; nothing is saved before Save.
+ * organization, an organization's communities, the team members who handle it and its place on
+ * OpenStreetMap. Each returns to the card; nothing is saved before Save.
  */
 import { handleCardStep, showCard, type CardActions, type CardHeader } from "../helpers/card";
 import {
@@ -29,7 +29,7 @@ import {
   osmLabel,
   searchOsmPlaces
 } from "./organization";
-import type { ChatId, FlowHandler, InlineKeyboardButton, SendMessage, Session } from "../types";
+import type { ChatId, FlowHandler, InlineKeyboardButton, SendMessage, SendOptions, Session } from "../types";
 
 const SAVE_FAILED = "Saving failed, nothing was saved. Please try again.";
 
@@ -37,8 +37,13 @@ const SAVE_FAILED = "Saving failed, nothing was saved. Please try again.";
 const CONTACT_FIELDS = { name: "name", email: "email", phone: "phone", nostr_npub: "nostr_npub" } as const;
 const ORGANIZATION_FIELDS = {
   organization: "name",
+  organization_category: "category",
+  organization_address: "address",
+  organization_phone: "phone",
+  organization_email: "email",
   organization_website: "website",
-  organization_nostr_npub: "nostr_npub"
+  organization_nostr_npub: "nostr_npub",
+  organization_follow_up_on: "follow_up_on"
 } as const;
 
 type CardKey = keyof typeof CONTACT_FIELDS | keyof typeof ORGANIZATION_FIELDS;
@@ -50,6 +55,8 @@ const BACK_BUTTON: InlineKeyboardButton = { text: "⬅️ Back", callback_data: 
 const fieldsOf = (session: Session): Record<string, string> =>
   session.edit_target === "organization" ? ORGANIZATION_FIELDS : CONTACT_FIELDS;
 
+const handlerIds = (session: Session) => [...(session.handler_ids ?? [])].sort((a, b) => a - b).join(",");
+
 const communityIds = (session: Session) =>
   (session.organization_communities ?? [])
     .map(c => c.id)
@@ -59,7 +66,11 @@ const communityIds = (session: Session) =>
 // The values of the actions, comparable with edit_original like the typed details.
 function actionValues(session: Session): Record<string, string | null> {
   if (session.edit_target === "organization") {
-    return { community_ids: communityIds(session), location_osm_id: session.location_osm_id ?? null };
+    return {
+      community_ids: communityIds(session),
+      team_member_ids: handlerIds(session),
+      location_osm_id: session.location_osm_id ?? null
+    };
   }
   return {
     type: session.type ?? null,
@@ -70,6 +81,9 @@ function actionValues(session: Session): Record<string, string | null> {
 const header: CardHeader = session => [
   session.edit_target === "organization" ? "✏️ Edit organization" : "✏️ Edit contact"
 ];
+
+const handlerNames = (session: Session) =>
+  (session.handler_ids ?? []).map(id => session.handler_choices?.[String(id)] ?? "?").join(", ");
 
 function locationLine(session: Session) {
   if (session.location_label) return session.location_label;
@@ -83,6 +97,11 @@ const actions: CardActions = session =>
           key: "communities",
           button: "👥 Communities",
           line: `👥 Communities: ${(session.organization_communities ?? []).map(c => c.name).join(", ") || "—"}`
+        },
+        {
+          key: "handlers",
+          button: "🤝 Handled by",
+          line: `🤝 Handled by: ${handlerNames(session) || "—"}`
         },
         { key: "location", button: "📍 Location", line: `📍 Location: ${locationLine(session)}` }
       ]
@@ -111,6 +130,14 @@ async function load(env: Env, session: Session) {
     session.organization = org.name;
     session.organization_website = org.website;
     session.organization_nostr_npub = org.nostr_npub;
+    session.organization_category = org.category;
+    session.organization_address = org.address;
+    session.organization_phone = org.phone;
+    session.organization_email = org.email;
+    session.organization_follow_up_on = org.follow_up_on;
+    session.handler_ids = org.handled_by.map(h => h.id);
+    // The names of the current handlers; the picker adds the rest of the team.
+    session.handler_choices = Object.fromEntries(org.handled_by.map(h => [String(h.id), h.name ?? "?"]));
     session.organization_communities = communities.map(c => ({ id: c.id, name: c.name, region: c.region }));
     session.location_osm_id = org.location_osm_id;
   } else {
@@ -155,7 +182,8 @@ async function save(
       const update = {
         ...changes,
         ...(changed("location_osm_id") ? { location_osm_id: session.location_osm_id ?? null } : {}),
-        ...(changed("community_ids") ? { community_ids: (session.organization_communities ?? []).map(c => c.id) } : {})
+        ...(changed("community_ids") ? { community_ids: (session.organization_communities ?? []).map(c => c.id) } : {}),
+        ...(changed("team_member_ids") ? { team_member_ids: session.handler_ids ?? [] } : {})
       };
       anything = Object.keys(update).length > 0;
       if (anything) res = await env.crmApi.updateOrg({ organization_id: ref.id, ...update, updated_by: updatedBy });
@@ -184,6 +212,22 @@ async function save(
     // The change is saved; only showing it again failed.
     console.error("Loading a card failed", e);
   }
+}
+
+// The team members to tick as handlers of the organization, redrawn in place with replace.
+function handlerPicker(session: Session, ids: number[], replace = false): [string, SendOptions] {
+  const picked = session.handler_picked ?? [];
+  const rows: InlineKeyboardButton[][] = ids.map(id => [
+    {
+      text: `${picked.includes(id) ? "✅ " : ""}${session.handler_choices?.[String(id)] ?? "?"}`,
+      callback_data: `handler:${id}`
+    }
+  ]);
+  rows.push([{ text: "Done", callback_data: "handlers:done" }], [BACK_BUTTON]);
+  return [
+    `Who handles "${session.organization}"? They follow it up.`,
+    { reply_markup: { inline_keyboard: rows }, ...(replace ? { replace } : {}) }
+  ];
 }
 
 // Asks for the name of the contact's organization; Unlink only when it has one.
@@ -260,6 +304,30 @@ async function handleActionStep(
       } else if (cb === "card:location") {
         session.osm_name = undefined;
         await askLocation(sendMessage, env, chatId, session, persistSession);
+      } else if (cb === "card:handlers") {
+        let members;
+        try {
+          members = await env.crmApi.listTeamMembers();
+        } catch (e) {
+          console.error("Loading the team failed", e);
+          await sendMessage(env, chatId, errorMessage("Loading the team failed. Please try again."));
+          return true;
+        }
+        session.handler_choices = {
+          ...session.handler_choices,
+          ...Object.fromEntries(members.map(m => [String(m.id), m.name ?? m.telegram_username ?? m.telegram_id]))
+        };
+        session.handler_picked = [...(session.handler_ids ?? [])];
+        setStep(session, "edit_handlers");
+        await persistSession();
+        await sendMessage(
+          env,
+          chatId,
+          ...handlerPicker(
+            session,
+            members.map(m => m.id)
+          )
+        );
       } else {
         return false;
       }
@@ -359,6 +427,30 @@ async function handleActionStep(
       } else {
         await sendMessage(env, chatId, errorMessage("Please use the buttons to select communities, then press Done."));
       }
+      return true;
+    }
+    case "edit_handlers": {
+      if (cb === "card:back") {
+        await backToCard();
+        return true;
+      }
+      if (cb === "handlers:done") {
+        session.handler_ids = session.handler_picked ?? [];
+        session.pressed_answer = handlerNames(session) || "Nobody";
+        await backToCard();
+        return true;
+      }
+      const id = cb?.startsWith("handler:") ? Number(cb.slice("handler:".length)) : undefined;
+      if (id === undefined || !session.handler_choices?.[String(id)]) {
+        await sendMessage(env, chatId, errorMessage("Please tick team members, then tap Done, or tap Back."));
+        return true;
+      }
+      const picked = session.handler_picked ?? [];
+      session.handler_picked = picked.includes(id) ? picked.filter(p => p !== id) : [...picked, id];
+      session.last_callback_data = null;
+      await persistSession();
+      const shown = Object.keys(session.handler_choices).map(Number);
+      await sendMessage(env, chatId, ...handlerPicker(session, shown, true));
       return true;
     }
     case "edit_location": {

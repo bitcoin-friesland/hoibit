@@ -9,6 +9,7 @@
  * actions: details that take more than one typed value (a choice, a search), which it asks for
  * itself when their button (card:<key>) is tapped.
  */
+import { followUpLabel, parseFutureDay } from "./day";
 import { errorMessage } from "./messaging";
 import { setStep } from "./session";
 import {
@@ -25,7 +26,18 @@ import {
 import type { ChatId, InlineKeyboardButton, SendMessage, Session } from "../types";
 
 type FieldKey =
-  "name" | "organization" | "email" | "phone" | "nostr_npub" | "organization_website" | "organization_nostr_npub";
+  | "name"
+  | "organization"
+  | "email"
+  | "phone"
+  | "nostr_npub"
+  | "organization_website"
+  | "organization_nostr_npub"
+  | "organization_category"
+  | "organization_address"
+  | "organization_phone"
+  | "organization_email"
+  | "organization_follow_up_on";
 
 interface Field {
   button: string;
@@ -36,6 +48,8 @@ interface Field {
   parse: (env: Env, session: Session, text: string) => Promise<{ value: string } | { error: string }>;
   // A name: it can be changed, not removed.
   required?: true;
+  // How the card shows the stored value, when not as it is.
+  show?: (value: string) => string;
 }
 
 // National numbers get +32 when all of the member's communities are Belgian, +31 otherwise.
@@ -51,6 +65,18 @@ async function countryCode(env: Env, session: Session) {
 
 const npub = async (_env: Env, _session: Session, text: string) =>
   isValidNpub(text) ? { value: text } : { error: "Please enter a valid nostr npub (npub1…)." };
+
+async function phone(env: Env, session: Session, text: string) {
+  const value = toInternationalPhone(text, isNationalPhone(text) ? await countryCode(env, session) : "31");
+  return value ? { value } : { error: "Please enter a valid phone number, for example 06 12345678." };
+}
+
+const email = async (_env: Env, _session: Session, text: string) =>
+  isValidEmail(text) ? { value: text } : { error: "Please enter a valid email address." };
+
+// Free text of a reasonable length, such as an address.
+const text = (what: string, max: number) => async (_env: Env, _session: Session, input: string) =>
+  input.length >= 2 && input.length <= max ? { value: input } : { error: `Please type the ${what}.` };
 
 const FIELDS: Record<FieldKey, Field> = {
   name: {
@@ -68,21 +94,12 @@ const FIELDS: Record<FieldKey, Field> = {
       isValidOrganizationName(text) ? { value: text } : { error: INVALID_ORGANIZATION_NAME },
     required: true
   },
-  email: {
-    button: "📧 Email",
-    label: "📧 Email",
-    prompt: "What is the email address?",
-    parse: async (_env, _session, text) =>
-      isValidEmail(text) ? { value: text } : { error: "Please enter a valid email address." }
-  },
+  email: { button: "📧 Email", label: "📧 Email", prompt: "What is the email address?", parse: email },
   phone: {
     button: "📞 Phone",
     label: "📞 Phone",
     prompt: "What is the phone number? For example 06 12345678 or +32 470 12 34 56.",
-    parse: async (env, session, text) => {
-      const phone = toInternationalPhone(text, isNationalPhone(text) ? await countryCode(env, session) : "31");
-      return phone ? { value: phone } : { error: "Please enter a valid phone number, for example 06 12345678." };
-    }
+    parse: phone
   },
   nostr_npub: { button: "🟣 Nostr", label: "🟣 Nostr", prompt: "What is the nostr npub? (npub1…)", parse: npub },
   organization_website: {
@@ -97,6 +114,40 @@ const FIELDS: Record<FieldKey, Field> = {
     label: "🟣 Organization nostr",
     prompt: "What is the nostr npub of the organization? (npub1…)",
     parse: npub
+  },
+  organization_category: {
+    button: "🏪 Kind",
+    label: "🏪 Kind of business",
+    prompt: "What kind of business is it? For example Restaurant, Hairdresser or Bike shop.",
+    parse: text("kind of business", 100)
+  },
+  organization_address: {
+    button: "🏠 Address",
+    label: "🏠 Address",
+    prompt: "What is the address? Street and number with the place, for example Kleinzand 1, Sneek.",
+    parse: text("address", 200)
+  },
+  organization_phone: {
+    button: "📞 Phone",
+    label: "📞 Phone",
+    prompt: "What is the organization's own phone number? For example 0515 123456.",
+    parse: phone
+  },
+  organization_email: {
+    button: "📧 Email",
+    label: "📧 Email",
+    prompt: "What is the organization's own email address? For example info@example.com.",
+    parse: email
+  },
+  organization_follow_up_on: {
+    button: "⏰ Follow-up",
+    label: "⏰ Follow up",
+    prompt: "On which day should it be followed up? For example 12-01 or 12-01-2027.",
+    parse: async (_env, _session, text) => {
+      const day = parseFutureDay(text);
+      return day ? { value: day } : { error: "Please type today or a day to come, for example 12-01-2027." };
+    },
+    show: followUpLabel
   }
 };
 
@@ -105,7 +156,16 @@ const FIELDS: Record<FieldKey, Field> = {
 function fieldsOf(session: Session): FieldKey[] {
   if (session.edit_target === "contact") return ["name", "email", "phone", "nostr_npub"];
   if (session.edit_target === "organization")
-    return ["organization", "organization_website", "organization_nostr_npub"];
+    return [
+      "organization",
+      "organization_category",
+      "organization_address",
+      "organization_phone",
+      "organization_email",
+      "organization_website",
+      "organization_nostr_npub",
+      "organization_follow_up_on"
+    ];
   if (session.mode === "org") return ["organization_website", "organization_nostr_npub"];
   const contact: FieldKey[] = ["email", "phone", "nostr_npub"];
   return session.organization ? [...contact, "organization_website", "organization_nostr_npub"] : contact;
@@ -136,7 +196,10 @@ export interface CardAction {
 export type CardActions = (session: Session) => CardAction[];
 
 function cardText(session: Session, header: CardHeader, actions: CardAction[]) {
-  const details = fieldsOf(session).map(key => `${labelOf(session, key)}: ${session[key] || "—"}`);
+  const details = fieldsOf(session).map(key => {
+    const value = session[key];
+    return `${labelOf(session, key)}: ${value ? (FIELDS[key].show?.(value) ?? value) : "—"}`;
+  });
   const hint = session.edit_target ? "Tap a detail to change it, then Save." : "Tap a detail to add it, or Save.";
   return [...header(session), "", ...details, ...actions.map(a => a.line), "", hint].join("\n");
 }
